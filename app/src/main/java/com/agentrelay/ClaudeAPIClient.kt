@@ -28,7 +28,7 @@ interface ClaudeAPI {
 
 class ClaudeAPIClient(
     private val apiKey: String,
-    private val model: String = "claude-opus-4-5-20251101", // Default to Opus, can use Sonnet for speed
+    private val model: String = "claude-sonnet-4-5", // Default model
     private val onUploadComplete: ((bytes: Int, milliseconds: Long) -> Unit)? = null
 ) {
 
@@ -115,6 +115,9 @@ class ClaudeAPIClient(
 
             IMPORTANT SCREEN INFORMATION:
             - The screenshot you see is ${screenshotInfo.scaledWidth}x${screenshotInfo.scaledHeight} pixels
+            - The screenshot has a NUMBERED GRID OVERLAY with lines every 100 pixels
+            - Yellow numbers show X coordinates (at top) and Y coordinates (at left)
+            - Use these grid numbers to determine precise tap coordinates
             - Return coordinates based on what you see in the screenshot
             - The system will automatically scale your coordinates to the actual device screen
 
@@ -219,97 +222,6 @@ class ClaudeAPIClient(
             ActionWithDescription(
                 AgentAction.Error("Failed to parse action: ${e.message}"),
                 "Failed to parse action"
-            )
-        }
-    }
-
-    companion object {
-        private const val TAG = "ClaudeAPIClient"
-    }
-}
-```
-
-Now let me build and install the APK:
-
-<function_calls>
-<invoke name="TodoWrite">
-<parameter name="todos">[{"content": "Update quality options in UI", "status": "completed", "activeForm": "Updating quality UI"}, {"content": "Implement fine-grained auto quality selection", "status": "completed", "activeForm": "Implementing auto quality"}, {"content": "Update system prompt for efficiency", "status": "completed", "activeForm": "Updating system prompt"}, {"content": "Build and install APK", "status": "in_progress", "activeForm": "Building and installing"}]
-
-        val messages = conversationHistory.toMutableList()
-        messages.add(
-            Message(
-                role = "user",
-                content = listOf(
-                    ContentBlock.ImageContent(
-                        source = ImageSource(
-                            data = screenshotInfo.base64Data,
-                            mediaType = screenshotInfo.mediaType
-                        )
-                    ),
-                    ContentBlock.TextContent(text = "What should I do next?")
-                )
-            )
-        )
-
-        return sendMessage(messages, systemPrompt).mapCatching { response ->
-            val text = response.content.firstOrNull()?.text
-                ?: throw Exception("No text in response")
-
-            parseActionWithDescription(text)
-        }
-    }
-
-    private fun parseActionWithDescription(jsonText: String): ActionWithDescription {
-        return try {
-            // Extract JSON from markdown code blocks or find first JSON object
-            var cleanJson = jsonText.trim()
-
-            // Remove markdown code blocks
-            if (cleanJson.contains("```json")) {
-                cleanJson = cleanJson.substringAfter("```json").substringBefore("```").trim()
-            } else if (cleanJson.contains("```")) {
-                cleanJson = cleanJson.substringAfter("```").substringBefore("```").trim()
-            }
-
-            // Find first { and last } to extract just the JSON object
-            val startIndex = cleanJson.indexOf('{')
-            val endIndex = cleanJson.lastIndexOf('}')
-
-            if (startIndex >= 0 && endIndex > startIndex) {
-                cleanJson = cleanJson.substring(startIndex, endIndex + 1)
-            }
-
-            val json = JsonParser.parseString(cleanJson).asJsonObject
-            val description = json.get("description")?.asString ?: "No description provided"
-
-            val action = when (json.get("action").asString) {
-                "tap" -> AgentAction.Tap(
-                    x = json.get("x").asInt,
-                    y = json.get("y").asInt
-                )
-                "swipe" -> AgentAction.Swipe(
-                    startX = json.get("startX").asInt,
-                    startY = json.get("startY").asInt,
-                    endX = json.get("endX").asInt,
-                    endY = json.get("endY").asInt,
-                    duration = json.get("duration")?.asLong ?: 500
-                )
-                "type" -> AgentAction.Type(text = json.get("text").asString)
-                "back" -> AgentAction.Back
-                "home" -> AgentAction.Home
-                "wait" -> AgentAction.Wait(ms = json.get("ms").asLong)
-                "complete" -> AgentAction.Complete(
-                    message = json.get("message")?.asString ?: "Task completed"
-                )
-                else -> AgentAction.Error("Unknown action: ${json.get("action").asString}")
-            }
-
-            ActionWithDescription(action, description)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to parse action from: $jsonText", e)
-            ActionWithDescription(
-                AgentAction.Error("Failed to parse action: ${e.message}"),
-                "Error parsing response"
             )
         }
     }

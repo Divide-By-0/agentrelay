@@ -263,6 +263,19 @@ class AgentOrchestrator(private val context: Context) {
                             failureContext.removeAt(0) // Keep only last 5
                         }
 
+                        // Add feedback to conversation history asking Claude to characterize what it sees
+                        conversationHistory.add(
+                            Message(
+                                role = "user",
+                                content = listOf(ContentBlock.TextContent(
+                                    text = "⚠️ WARNING: Your last action ($description) did NOT change the screen. " +
+                                            "In the next screenshot, carefully describe what you actually see and what element you may have clicked by mistake. " +
+                                            "If you keep seeing the same screen, you may be clicking the wrong element (e.g., keyboard letters instead of search button). " +
+                                            "Analyze the screenshot with the grid overlay to understand what's at the coordinates you clicked."
+                                ))
+                            )
+                        )
+
                         if (consecutiveFailures >= 3) {
                             addStatus("🔄 Detected loop - trying back button...")
                             automationService.performBack()
@@ -275,6 +288,15 @@ class AgentOrchestrator(private val context: Context) {
                         // Screen changed successfully
                         if (consecutiveFailures > 0) {
                             addStatus("✅ Screen changed - progress made")
+                            // Add positive feedback to conversation
+                            conversationHistory.add(
+                                Message(
+                                    role = "user",
+                                    content = listOf(ContentBlock.TextContent(
+                                        text = "✅ Good! The screen changed after your last action. Continue with your task."
+                                    ))
+                                )
+                            )
                         }
                         consecutiveFailures = 0
                     }
@@ -357,22 +379,21 @@ class AgentOrchestrator(private val context: Context) {
     private fun scaleAction(action: AgentAction, screenshotInfo: ScreenshotInfo): AgentAction {
         val scaleX = screenshotInfo.actualWidth.toFloat() / screenshotInfo.scaledWidth
         val scaleY = screenshotInfo.actualHeight.toFloat() / screenshotInfo.scaledHeight
-        val statusBarOffset = screenshotInfo.statusBarHeight
 
-        Log.d(TAG, "Scaling coordinates: scaleX=$scaleX, scaleY=$scaleY, statusBarOffset=$statusBarOffset")
+        Log.d(TAG, "Scaling coordinates: scaleX=$scaleX, scaleY=$scaleY")
 
         return when (action) {
             is AgentAction.Tap -> {
                 val scaledX = (action.x * scaleX).toInt()
-                val scaledY = (action.y * scaleY).toInt() + statusBarOffset
-                Log.d(TAG, "Tap: (${action.x}, ${action.y}) -> scaled ($scaledX, ${(action.y * scaleY).toInt()}) -> with offset ($scaledX, $scaledY)")
+                val scaledY = (action.y * scaleY).toInt()
+                Log.d(TAG, "Tap: (${action.x}, ${action.y}) -> scaled ($scaledX, $scaledY)")
                 AgentAction.Tap(scaledX, scaledY)
             }
             is AgentAction.Swipe -> {
                 val scaledStartX = (action.startX * scaleX).toInt()
-                val scaledStartY = (action.startY * scaleY).toInt() + statusBarOffset
+                val scaledStartY = (action.startY * scaleY).toInt()
                 val scaledEndX = (action.endX * scaleX).toInt()
-                val scaledEndY = (action.endY * scaleY).toInt() + statusBarOffset
+                val scaledEndY = (action.endY * scaleY).toInt()
                 AgentAction.Swipe(scaledStartX, scaledStartY, scaledEndX, scaledEndY, action.duration)
             }
             else -> action // Other actions don't need scaling

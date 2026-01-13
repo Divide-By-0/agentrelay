@@ -44,7 +44,7 @@ class SecureStorage(context: Context) {
     }
 
     fun getModel(): String {
-        return sharedPreferences.getString(KEY_MODEL, "claude-opus-4-5-20251101") ?: "claude-opus-4-5-20251101"
+        return sharedPreferences.getString(KEY_MODEL, "gemini-2.0-flash-exp") ?: "gemini-2.0-flash-exp"
     }
 
     fun saveScreenshotQuality(quality: Int) {

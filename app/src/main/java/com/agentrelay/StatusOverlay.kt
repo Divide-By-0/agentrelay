@@ -26,9 +26,11 @@ class StatusOverlay(private val context: Context) {
     private var stopButton: View? = null
     private var collapseButton: TextView? = null
     private var isShowing = false
-    private var isCollapsed = false
     private val statusMessages = mutableListOf<String>()
     private var scrollViewHeight = 600 // Default height
+
+    // Persistent state that survives hide/show cycles
+    private var savedIsCollapsed = false
 
     fun show() {
         if (isShowing) return
@@ -233,7 +235,8 @@ class StatusOverlay(private val context: Context) {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                     WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
             PixelFormat.TRANSLUCENT
         ).apply {
@@ -272,7 +275,18 @@ class StatusOverlay(private val context: Context) {
         try {
             windowManager.addView(container, params)
             isShowing = true
-            Log.d(TAG, "Status overlay shown")
+
+            // Restore saved collapse state
+            if (savedIsCollapsed) {
+                // Apply collapse without animation
+                val visibility = android.view.View.GONE
+                scrollView?.visibility = visibility
+                resizeHandle?.visibility = visibility
+                stopButton?.visibility = visibility
+                collapseButton?.text = "▶"
+            }
+
+            Log.d(TAG, "Status overlay shown (collapsed=$savedIsCollapsed)")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to show status overlay", e)
         }
@@ -331,18 +345,18 @@ class StatusOverlay(private val context: Context) {
     }
 
     private fun toggleCollapse() {
-        isCollapsed = !isCollapsed
+        savedIsCollapsed = !savedIsCollapsed
 
         // Update visibility
-        val visibility = if (isCollapsed) android.view.View.GONE else android.view.View.VISIBLE
+        val visibility = if (savedIsCollapsed) android.view.View.GONE else android.view.View.VISIBLE
         scrollView?.visibility = visibility
         resizeHandle?.visibility = visibility
         stopButton?.visibility = visibility
 
         // Update collapse button icon
-        collapseButton?.text = if (isCollapsed) "▶" else "▼"
+        collapseButton?.text = if (savedIsCollapsed) "▶" else "▼"
 
-        Log.d(TAG, "Toggled collapse: isCollapsed=$isCollapsed")
+        Log.d(TAG, "Toggled collapse: isCollapsed=$savedIsCollapsed")
     }
 
     companion object {

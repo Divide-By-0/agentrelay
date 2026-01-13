@@ -4,6 +4,9 @@ import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -67,6 +70,7 @@ class ScreenCaptureService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Always start foreground with notification first
         val notification = createNotification()
         startForeground(NOTIFICATION_ID, notification)
 
@@ -83,8 +87,15 @@ class ScreenCaptureService : Service() {
                 val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
                 val data = intent.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
                 if (resultCode != 0 && data != null) {
+                    Log.d(TAG, "Initializing MediaProjection with permission data")
                     initMediaProjection(resultCode, data)
+                } else {
+                    Log.e(TAG, "Invalid MediaProjection data received")
                 }
+            }
+            null -> {
+                // Service started without action - just show notification and wait for projection
+                Log.d(TAG, "Service started, waiting for screen capture permission")
             }
         }
 
@@ -102,8 +113,14 @@ class ScreenCaptureService : Service() {
 
     private fun initMediaProjection(resultCode: Int, data: Intent) {
         try {
+            Log.d(TAG, "Starting MediaProjection initialization...")
             val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             mediaProjection = projectionManager.getMediaProjection(resultCode, data)
+
+            if (mediaProjection == null) {
+                Log.e(TAG, "MediaProjection is null after getMediaProjection()")
+                return
+            }
 
             // Register callback (required for Android 14+)
             mediaProjection?.registerCallback(object : MediaProjection.Callback() {
@@ -113,6 +130,7 @@ class ScreenCaptureService : Service() {
                 }
             }, null)
 
+            Log.d(TAG, "Creating ImageReader: ${screenWidth}x${screenHeight}")
             imageReader = ImageReader.newInstance(
                 screenWidth,
                 screenHeight,
@@ -120,6 +138,7 @@ class ScreenCaptureService : Service() {
                 2
             )
 
+            Log.d(TAG, "Creating VirtualDisplay...")
             virtualDisplay = mediaProjection?.createVirtualDisplay(
                 "AgentRelayCapture",
                 screenWidth,
@@ -131,7 +150,11 @@ class ScreenCaptureService : Service() {
                 null
             )
 
-            Log.d(TAG, "Media projection initialized")
+            if (virtualDisplay == null) {
+                Log.e(TAG, "VirtualDisplay is null after creation")
+            } else {
+                Log.d(TAG, "MediaProjection initialized successfully!")
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize media projection", e)
         }
@@ -200,6 +223,79 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    private fun addGridOverlay(bitmap: Bitmap): Bitmap {
+        val mutableBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(mutableBitmap)
+
+        // Configure paint for grid lines - bright white for visibility on dark backgrounds
+        val gridPaint = Paint().apply {
+            color = Color.argb(120, 255, 255, 255) // Bright white with moderate opacity
+            strokeWidth = 2f
+            style = Paint.Style.STROKE
+        }
+
+        // Configure paint for text - bright cyan with shadow for visibility on any background
+        val textPaint = Paint().apply {
+            color = Color.argb(255, 0, 255, 255) // Bright cyan
+            textSize = 16f
+            isAntiAlias = true
+            style = Paint.Style.FILL
+            setShadowLayer(3f, 0f, 0f, Color.BLACK) // Dark shadow for contrast
+        }
+
+        // Configure background for text numbers - inverted (white) for dark backgrounds
+        val textBgPaint = Paint().apply {
+            color = Color.argb(180, 255, 255, 255) // Semi-transparent white background
+            style = Paint.Style.FILL
+        }
+
+        val width = bitmap.width
+        val height = bitmap.height
+
+        // Draw grid every 100 pixels
+        val gridSpacing = 100
+
+        // Vertical lines with X coordinates
+        var x = gridSpacing
+        while (x < width) {
+            canvas.drawLine(x.toFloat(), 0f, x.toFloat(), height.toFloat(), gridPaint)
+            // Draw X coordinate label at top
+            val label = x.toString()
+            val textWidth = textPaint.measureText(label)
+            canvas.drawRect(
+                x - textWidth / 2 - 2,
+                2f,
+                x + textWidth / 2 + 2,
+                18f,
+                textBgPaint
+            )
+            canvas.drawText(label, x - textWidth / 2, 14f, textPaint)
+            x += gridSpacing
+        }
+
+        // Horizontal lines with Y coordinates
+        var y = gridSpacing
+        while (y < height) {
+            canvas.drawLine(0f, y.toFloat(), width.toFloat(), y.toFloat(), gridPaint)
+            // Draw Y coordinate label at left
+            val label = y.toString()
+            val textWidth = textPaint.measureText(label)
+            canvas.drawRect(
+                2f,
+                y - 8f,
+                textWidth + 6,
+                y + 8f,
+                textBgPaint
+            )
+            canvas.drawText(label, 4f, y + 5f, textPaint)
+            y += gridSpacing
+        }
+
+        Log.d(TAG, "Added grid overlay with ${width / gridSpacing} x ${height / gridSpacing} cells")
+
+        return mutableBitmap
+    }
+
     private fun bitmapToBase64WithDimensions(bitmap: Bitmap, actualWidth: Int, actualHeight: Int): ScreenshotInfo {
         val secureStorage = SecureStorage.getInstance(this)
         var quality = secureStorage.getScreenshotQuality()
@@ -233,7 +329,10 @@ class ScreenCaptureService : Service() {
 
         val scaledWidth = (bitmap.width * scale).toInt()
         val scaledHeight = (bitmap.height * scale).toInt()
-        val scaledBitmap = Bitmap.createScaledBitmap(bitmap, scaledWidth, scaledHeight, true)
+        var scaledBitmap = Bitmap.createScaledBitmap(bitmap, scaledWidth, scaledHeight, true)
+
+        // Add numbered gridlines overlay for better coordinate accuracy
+        scaledBitmap = addGridOverlay(scaledBitmap)
 
         val outputStream = ByteArrayOutputStream()
         // Use JPEG for better compression if quality < 100, PNG otherwise

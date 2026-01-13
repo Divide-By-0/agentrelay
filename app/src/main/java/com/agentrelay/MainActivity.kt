@@ -108,8 +108,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestScreenCapture() {
-        val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        startActivityForResult(projectionManager.createScreenCaptureIntent(), screenCaptureRequestCode)
+        // Start the service FIRST as a foreground service to ensure it stays alive
+        val serviceIntent = Intent(this, ScreenCaptureService::class.java)
+        startForegroundService(serviceIntent)
+
+        // Give service a moment to initialize
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            // THEN request screen capture permission
+            val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            startActivityForResult(projectionManager.createScreenCaptureIntent(), screenCaptureRequestCode)
+        }, 500)
     }
 
     @Deprecated("Deprecated in Java")
@@ -117,13 +125,14 @@ class MainActivity : ComponentActivity() {
         super.onActivityResult(requestCode, resultCode, data)
 
         if (requestCode == screenCaptureRequestCode && resultCode == Activity.RESULT_OK && data != null) {
+            // Service is already running, just send it the projection data
             val intent = Intent(this, ScreenCaptureService::class.java).apply {
                 action = ScreenCaptureService.ACTION_INIT_PROJECTION
                 putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
                 putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
             }
-            startForegroundService(intent)
-            Toast.makeText(this, "Service started! Check the notification.", Toast.LENGTH_LONG).show()
+            startService(intent) // Use startService, not startForegroundService (already running)
+            Toast.makeText(this, "Screen capture enabled! Check the notification.", Toast.LENGTH_LONG).show()
         }
     }
 }
@@ -390,8 +399,11 @@ fun SetupTab(
                 val secureStorage = SecureStorage.getInstance(LocalContext.current)
                 var selectedModel by remember { mutableStateOf(secureStorage.getModel()) }
                 val modelOptions = mapOf(
-                    "claude-opus-4-5-20251101" to "Claude Opus 4.5 (Best)",
-                    "claude-sonnet-4-5-20250514" to "Claude Sonnet 4.5 (Faster)"
+                    "gemini-2.0-flash-exp" to "Gemini 2.0 Flash (Default)",
+                    "gemini-2.0-flash-thinking-exp" to "Gemini 2.0 Flash Thinking",
+                    "gemini-exp-1206" to "Gemini Exp 1206",
+                    "claude-opus-4-5" to "Claude Opus 4.5 (Best)",
+                    "claude-sonnet-4-5" to "Claude Sonnet 4.5 (Fast)"
                 )
 
                 Text(
@@ -798,6 +810,7 @@ fun PermissionCard(
 @Composable
 fun ActivityTab(conversationItems: List<ConversationItem>) {
     var expandedItems by remember { mutableStateOf(setOf<Long>()) }
+    var expandedScreenshot by remember { mutableStateOf<String?>(null) }
 
     LazyColumn(
         modifier = Modifier
@@ -927,7 +940,10 @@ fun ActivityTab(conversationItems: List<ConversationItem>) {
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .height(200.dp)
-                                        .clip(RoundedCornerShape(8.dp)),
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable {
+                                            expandedScreenshot = screenshot
+                                        },
                                     contentScale = ContentScale.Fit
                                 )
                             } else {
@@ -968,6 +984,72 @@ fun ActivityTab(conversationItems: List<ConversationItem>) {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
                     )
+                }
+            }
+        }
+    }
+
+    // Expanded screenshot dialog
+    expandedScreenshot?.let { screenshot ->
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { expandedScreenshot = null }
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.9f))
+                    .clickable { expandedScreenshot = null },
+                contentAlignment = Alignment.Center
+            ) {
+                val imageBitmap = remember(screenshot) {
+                    try {
+                        val imageBytes = Base64.decode(screenshot, Base64.DEFAULT)
+                        BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)?.asImageBitmap()
+                    } catch (e: Exception) {
+                        null
+                    }
+                }
+
+                if (imageBitmap != null) {
+                    Column(
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        // Close button at top
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            IconButton(
+                                onClick = { expandedScreenshot = null },
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .background(
+                                        color = MaterialTheme.colorScheme.surface,
+                                        shape = CircleShape
+                                    )
+                            ) {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = "Close",
+                                    tint = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+
+                        // Expanded image
+                        Image(
+                            bitmap = imageBitmap,
+                            contentDescription = "Expanded Screenshot",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f)
+                                .padding(16.dp),
+                            contentScale = ContentScale.Fit
+                        )
+                    }
                 }
             }
         }

@@ -1,0 +1,157 @@
+package com.agentrelay
+
+import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.content.Context
+import android.graphics.Path
+import android.util.Log
+import android.view.accessibility.AccessibilityEvent
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+
+class AutomationService : AccessibilityService() {
+
+    private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // We don't need to handle events for this use case
+    }
+
+    override fun onInterrupt() {
+        Log.d(TAG, "Service interrupted")
+    }
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        instance = this
+        Log.d(TAG, "AutomationService connected")
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        instance = null
+    }
+
+    suspend fun performTap(x: Int, y: Int): Boolean {
+        return suspendCancellableCoroutine { continuation ->
+            Log.d(TAG, "Performing tap at ($x, $y)")
+
+            // Get display info for debugging
+            val windowManager = getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
+            val metrics = android.util.DisplayMetrics()
+            windowManager.defaultDisplay.getRealMetrics(metrics)
+            Log.d(TAG, "Display: ${metrics.widthPixels}x${metrics.heightPixels}, density: ${metrics.densityDpi}")
+
+            val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
+            val gestureBuilder = GestureDescription.Builder()
+            val gesture = gestureBuilder
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 50))
+                .build()
+
+            val callback = object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    super.onCompleted(gestureDescription)
+                    Log.d(TAG, "Tap completed at ($x, $y)")
+                    if (continuation.isActive) {
+                        continuation.resume(true)
+                    }
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    super.onCancelled(gestureDescription)
+                    Log.e(TAG, "Tap cancelled at ($x, $y)")
+                    if (continuation.isActive) {
+                        continuation.resume(false)
+                    }
+                }
+            }
+
+            val dispatched = dispatchGesture(gesture, callback, null)
+            if (!dispatched) {
+                Log.e(TAG, "Failed to dispatch tap gesture")
+                if (continuation.isActive) {
+                    continuation.resume(false)
+                }
+            }
+        }
+    }
+
+    suspend fun performSwipe(startX: Int, startY: Int, endX: Int, endY: Int, duration: Long = 500): Boolean {
+        return suspendCancellableCoroutine { continuation ->
+            val path = Path().apply {
+                moveTo(startX.toFloat(), startY.toFloat())
+                lineTo(endX.toFloat(), endY.toFloat())
+            }
+
+            val gestureBuilder = GestureDescription.Builder()
+            val gesture = gestureBuilder
+                .addStroke(GestureDescription.StrokeDescription(path, 0, duration))
+                .build()
+
+            val callback = object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    super.onCompleted(gestureDescription)
+                    Log.d(TAG, "Swipe completed from ($startX, $startY) to ($endX, $endY)")
+                    if (continuation.isActive) {
+                        continuation.resume(true)
+                    }
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    super.onCancelled(gestureDescription)
+                    Log.e(TAG, "Swipe cancelled")
+                    if (continuation.isActive) {
+                        continuation.resume(false)
+                    }
+                }
+            }
+
+            val dispatched = dispatchGesture(gesture, callback, null)
+            if (!dispatched) {
+                Log.e(TAG, "Failed to dispatch swipe gesture")
+                if (continuation.isActive) {
+                    continuation.resume(false)
+                }
+            }
+        }
+    }
+
+    suspend fun performType(text: String): Boolean {
+        // Typing is done by copying to clipboard
+        // The user can then manually paste or the agent can tap the paste button
+        return try {
+            val clipboardManager = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            val clip = android.content.ClipData.newPlainText("agent_text", text)
+            clipboardManager.setPrimaryClip(clip)
+            delay(100)
+            Log.d(TAG, "Text copied to clipboard: $text")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to copy text to clipboard", e)
+            false
+        }
+    }
+
+    suspend fun performBack(): Boolean {
+        return performGlobalAction(GLOBAL_ACTION_BACK)
+    }
+
+    suspend fun performHome(): Boolean {
+        return performGlobalAction(GLOBAL_ACTION_HOME)
+    }
+
+    companion object {
+        private const val TAG = "AutomationService"
+
+        @Volatile
+        var instance: AutomationService? = null
+            private set
+
+        fun isServiceEnabled(): Boolean = instance != null
+    }
+}

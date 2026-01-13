@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AgentRelay</string>
+    <string name="channel_name">Agent Service</string>
+    <string name="channel_description">Automation agent service</string>
+    <string name="notification_title">Agent Ready</string>
+    <string name="notification_text">Tap to start automation</string>
+    <string name="action_start_agent">Start Agent</string>
+    <string name="action_stop_agent">Stop Agent</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="api_key_label">Claude API Key</string>
+    <string name="api_key_hint">sk-ant-api03-…</string>
+    <string name="save_button">Save</string>
+    <string name="start_service_button">Start Service</string>
+    <string name="stop_service_button">Stop Service</string>
+
+    <!-- Permissions -->
+    <string name="permission_accessibility_title">Accessibility Permission Required</string>
+    <string name="permission_accessibility_desc">Enable accessibility service to allow cursor control</string>
+    <string name="permission_overlay_title">Overlay Permission Required</string>
+    <string name="permission_overlay_desc">Allow app to draw over other apps</string>
+    <string name="permission_notification_title">Notification Permission Required</string>
+    <string name="permission_notification_desc">Allow app to show notifications</string>
+
+    <!-- Accessibility Service -->
+    <string name="accessibility_service_description">Allows AgentRelay to control your device with AI assistance</string>
+
+    <!-- Overlay -->
+    <string name="prompt_hint">Enter your task…</string>
+    <string name="start_task">Start Task</string>
+    <string name="cancel">Cancel</string>
+</resources>

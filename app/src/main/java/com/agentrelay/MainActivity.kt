@@ -14,6 +14,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
@@ -25,23 +26,44 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+
+// iOS-like color constants
+private val IOSBackground = Color(0xFFF2F2F7)
+private val IOSCardBackground = Color.White
+private val IOSBlue = Color(0xFF007AFF)
+private val IOSGreen = Color(0xFF34C759)
+private val IOSRed = Color(0xFFFF3B30)
+private val IOSOrange = Color(0xFFFF9500)
+private val IOSGray = Color(0xFF8E8E93)
+private val IOSGray2 = Color(0xFFAEAEB2)
+private val IOSGray4 = Color(0xFFD1D1D6)
+private val IOSGray6 = Color(0xFFF2F2F7)
+private val IOSLabel = Color(0xFF000000)
+private val IOSSecondaryLabel = Color(0xFF3C3C43).copy(alpha = 0.6f)
+private val IOSTertiaryLabel = Color(0xFF3C3C43).copy(alpha = 0.3f)
+private val IOSSeparator = Color(0xFF3C3C43).copy(alpha = 0.12f)
 
 class MainActivity : ComponentActivity() {
 
@@ -54,7 +76,7 @@ class MainActivity : ComponentActivity() {
             AgentRelayTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
+                    color = IOSBackground
                 ) {
                     MainScreen(
                         onRequestScreenCapture = ::requestScreenCapture
@@ -68,71 +90,42 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun autoRestartServiceIfNeeded() {
-        // Check if service is already running
-        if (ScreenCaptureService.instance != null) {
-            return
-        }
-
-        // Check if we have API key
+        if (ScreenCaptureService.instance != null) return
         val secureStorage = SecureStorage.getInstance(this)
-        if (!secureStorage.hasApiKey()) {
-            return
-        }
-
-        // Check if we have accessibility permission
-        if (!AutomationService.isServiceEnabled()) {
-            return
-        }
-
-        // Check if we have overlay permission
+        if (!secureStorage.hasApiKey()) return
+        if (!AutomationService.isServiceEnabled()) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            if (!Settings.canDrawOverlays(this)) {
-                return
-            }
+            if (!Settings.canDrawOverlays(this)) return
         }
-
-        // All permissions granted, restart the service
         requestScreenCapture()
     }
 
     private fun requestPermissions() {
         val permissions = mutableListOf<String>()
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)
         }
-
         if (permissions.isNotEmpty()) {
             ActivityCompat.requestPermissions(this, permissions.toTypedArray(), 1)
         }
     }
 
     private fun requestScreenCapture() {
-        // Start the service FIRST as a foreground service to ensure it stays alive
-        val serviceIntent = Intent(this, ScreenCaptureService::class.java)
-        startForegroundService(serviceIntent)
-
-        // Give service a moment to initialize
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            // THEN request screen capture permission
-            val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            startActivityForResult(projectionManager.createScreenCaptureIntent(), screenCaptureRequestCode)
-        }, 500)
+        val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        startActivityForResult(projectionManager.createScreenCaptureIntent(), screenCaptureRequestCode)
     }
 
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-
         if (requestCode == screenCaptureRequestCode && resultCode == Activity.RESULT_OK && data != null) {
-            // Service is already running, just send it the projection data
             val intent = Intent(this, ScreenCaptureService::class.java).apply {
                 action = ScreenCaptureService.ACTION_INIT_PROJECTION
                 putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
                 putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
             }
-            startService(intent) // Use startService, not startForegroundService (already running)
-            Toast.makeText(this, "Screen capture enabled! Check the notification.", Toast.LENGTH_LONG).show()
+            startForegroundService(intent)
+            Toast.makeText(this, "Screen capture enabled!", Toast.LENGTH_SHORT).show()
         }
     }
 }
@@ -140,24 +133,29 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun AgentRelayTheme(content: @Composable () -> Unit) {
     MaterialTheme(
-        colorScheme = darkColorScheme(
-            primary = Color(0xFFCC9B6D),
-            secondary = Color(0xFFB89968),
-            background = Color(0xFF1A1818),
-            surface = Color(0xFF2B2826),
+        colorScheme = lightColorScheme(
+            primary = IOSBlue,
+            secondary = IOSGray,
+            background = IOSBackground,
+            surface = IOSCardBackground,
             onPrimary = Color.White,
             onSecondary = Color.White,
-            onBackground = Color(0xFFE8E3E0),
-            onSurface = Color(0xFFE8E3E0)
+            onBackground = IOSLabel,
+            onSurface = IOSLabel,
+            error = IOSRed,
+            surfaceVariant = IOSGray6,
+            outline = IOSGray4
         ),
         content = content
     )
 }
 
+// ─── Main Screen with Bottom Navigation ───────────────────────────────────────
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(onRequestScreenCapture: () -> Unit) {
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = LocalContext.current
     val secureStorage = remember { SecureStorage.getInstance(context) }
 
     var apiKey by remember { mutableStateOf(secureStorage.getApiKey() ?: "") }
@@ -165,893 +163,799 @@ fun MainScreen(onRequestScreenCapture: () -> Unit) {
     var isServiceOperationLoading by remember { mutableStateOf(false) }
     var overlayPermission by remember {
         mutableStateOf(
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
                 Settings.canDrawOverlays(context)
-            } else true
+            else true
         )
     }
     var accessibilityPermission by remember { mutableStateOf(AutomationService.isServiceEnabled()) }
-    var statusMessages by remember { mutableStateOf(listOf<String>()) }
     var conversationItems by remember { mutableStateOf(listOf<ConversationItem>()) }
     var selectedTab by remember { mutableStateOf(0) }
     val coroutineScope = rememberCoroutineScope()
 
-    // Auto-refresh permissions every 10 seconds
     LaunchedEffect(Unit) {
         while (true) {
-            delay(10000)
-            overlayPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                Settings.canDrawOverlays(context)
-            } else true
+            delay(2000)
+            overlayPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                Settings.canDrawOverlays(context) else true
             accessibilityPermission = AutomationService.isServiceEnabled()
             serviceRunning = ScreenCaptureService.instance != null
         }
     }
 
-    // Listen to status updates
     DisposableEffect(Unit) {
-        val statusListener: (String) -> Unit = { message ->
-            statusMessages = (statusMessages + message).takeLast(100)
-        }
         val conversationListener: (List<ConversationItem>) -> Unit = { items ->
             conversationItems = items
         }
-        StatusBroadcaster.addListener(statusListener)
         ConversationHistoryManager.addListener(conversationListener)
         onDispose {
-            StatusBroadcaster.removeListener(statusListener)
             ConversationHistoryManager.removeListener(conversationListener)
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
-        // Top Bar
-        TopAppBar(
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(32.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.Default.SmartToy,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text(
-                        "Agent Relay",
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            },
-            colors = TopAppBarDefaults.topAppBarColors(
-                containerColor = MaterialTheme.colorScheme.surface
-            )
-        )
-
-        // Tabs
-        TabRow(
-            selectedTabIndex = selectedTab,
-            containerColor = MaterialTheme.colorScheme.surface
-        ) {
-            Tab(
-                selected = selectedTab == 0,
-                onClick = { selectedTab = 0 },
-                text = { Text("Setup") }
-            )
-            Tab(
-                selected = selectedTab == 1,
-                onClick = { selectedTab = 1 },
-                text = { Text("Activity") }
+    Scaffold(
+        containerColor = IOSBackground,
+        bottomBar = {
+            IOSBottomBar(
+                selectedTab = selectedTab,
+                onTabSelected = { selectedTab = it }
             )
         }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+        ) {
+            // iOS-style large title
+            Text(
+                text = if (selectedTab == 0) "Agent" else "Settings",
+                fontSize = 34.sp,
+                fontWeight = FontWeight.Bold,
+                color = IOSLabel,
+                modifier = Modifier.padding(start = 20.dp, top = 8.dp, bottom = 12.dp)
+            )
 
-        when (selectedTab) {
-            0 -> SetupTab(
-                apiKey = apiKey,
-                onApiKeyChange = { apiKey = it },
-                onSaveApiKey = {
-                    if (secureStorage.isValidApiKey(apiKey)) {
-                        secureStorage.saveApiKey(apiKey)
-                        Toast.makeText(context, "API key saved", Toast.LENGTH_SHORT).show()
-                    } else {
-                        Toast.makeText(context, "Invalid API key format", Toast.LENGTH_SHORT).show()
-                    }
-                },
-                overlayPermission = overlayPermission,
-                accessibilityPermission = accessibilityPermission,
-                serviceRunning = serviceRunning,
-                onRequestOverlayPermission = {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                        val intent = Intent(
-                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                            Uri.parse("package:${context.packageName}")
-                        )
-                        context.startActivity(intent)
-                    }
-                },
-                onRequestAccessibilityPermission = {
-                    try {
-                        // Try to open directly to our service's settings
-                        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        // Add fragment arguments to try to highlight our service
-                        val bundle = android.os.Bundle()
-                        val componentName = "${context.packageName}/.AutomationService"
-                        bundle.putString(":settings:fragment_args_key", componentName)
-                        intent.putExtra(":settings:fragment_args_key", componentName)
-                        intent.putExtra(":settings:show_fragment_args", bundle)
-                        context.startActivity(intent)
-
-                        // Show helpful toast
-                        Toast.makeText(
-                            context,
-                            "Look for 'Agent Relay' in the list and toggle it on",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    } catch (e: Exception) {
-                        // Fallback to general settings
-                        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                        context.startActivity(intent)
-                    }
-                },
-                onStartService = {
-                    if (!secureStorage.hasApiKey()) {
-                        Toast.makeText(context, "Please set API key first", Toast.LENGTH_SHORT).show()
-                    } else if (!accessibilityPermission) {
-                        Toast.makeText(context, "Please enable Accessibility Service", Toast.LENGTH_SHORT).show()
-                    } else if (!overlayPermission) {
-                        Toast.makeText(context, "Please grant overlay permission", Toast.LENGTH_SHORT).show()
-                    } else {
-                        isServiceOperationLoading = true
-                        onRequestScreenCapture()
-                        // Reset loading state after a short delay since permission dialog opens
+            when (selectedTab) {
+                0 -> AgentTab(
+                    serviceRunning = serviceRunning,
+                    accessibilityPermission = accessibilityPermission,
+                    overlayPermission = overlayPermission,
+                    isServiceOperationLoading = isServiceOperationLoading,
+                    conversationItems = conversationItems,
+                    onStartService = {
+                        if (!secureStorage.hasApiKey()) {
+                            Toast.makeText(context, "Please set API key first", Toast.LENGTH_SHORT).show()
+                        } else if (!accessibilityPermission) {
+                            Toast.makeText(context, "Enable Accessibility Service in Settings", Toast.LENGTH_SHORT).show()
+                        } else if (!overlayPermission) {
+                            Toast.makeText(context, "Grant overlay permission in Settings", Toast.LENGTH_SHORT).show()
+                        } else {
+                            isServiceOperationLoading = true
+                            onRequestScreenCapture()
+                            coroutineScope.launch {
+                                // Poll until service is actually running (up to 10s)
+                                var waited = 0
+                                while (ScreenCaptureService.instance == null && waited < 10000) {
+                                    delay(250)
+                                    waited += 250
+                                }
+                                serviceRunning = ScreenCaptureService.instance != null
+                                isServiceOperationLoading = false
+                            }
+                        }
+                    },
+                    onStopService = {
                         coroutineScope.launch {
-                            delay(500)
+                            isServiceOperationLoading = true
+                            withContext(Dispatchers.IO) {
+                                context.stopService(Intent(context, ScreenCaptureService::class.java))
+                            }
+                            // Poll until service is actually stopped (up to 5s)
+                            var waited = 0
+                            while (ScreenCaptureService.instance != null && waited < 5000) {
+                                delay(250)
+                                waited += 250
+                            }
+                            serviceRunning = ScreenCaptureService.instance == null
                             isServiceOperationLoading = false
                         }
                     }
-                },
-                onStopService = {
-                    coroutineScope.launch {
-                        isServiceOperationLoading = true
-                        withContext(Dispatchers.IO) {
-                            context.stopService(Intent(context, ScreenCaptureService::class.java))
+                )
+                1 -> SettingsTab(
+                    apiKey = apiKey,
+                    onApiKeyChange = { apiKey = it },
+                    onSaveApiKey = {
+                        if (secureStorage.isValidApiKey(apiKey)) {
+                            secureStorage.saveApiKey(apiKey)
+                            Toast.makeText(context, "API key saved", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "Invalid API key format", Toast.LENGTH_SHORT).show()
                         }
-                        delay(300) // Brief delay to ensure service stops
-                        serviceRunning = false
-                        isServiceOperationLoading = false
+                    },
+                    overlayPermission = overlayPermission,
+                    accessibilityPermission = accessibilityPermission,
+                    onRequestOverlayPermission = {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            context.startActivity(
+                                Intent(
+                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    Uri.parse("package:${context.packageName}")
+                                )
+                            )
+                        }
+                    },
+                    onRequestAccessibilityPermission = {
+                        try {
+                            // Open Accessibility > Installed apps directly
+                            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            // On Samsung/Android 13+, try to go to "Installed apps" section
+                            val bundle = android.os.Bundle()
+                            bundle.putString(":settings:fragment_args_key", "installed_services")
+                            intent.putExtra(":settings:fragment_args_key", "installed_services")
+                            intent.putExtra(":settings:show_fragment_args", bundle)
+                            context.startActivity(intent)
+                            Toast.makeText(
+                                context,
+                                "Tap 'Installed apps', then find Agent Relay and enable it",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        } catch (e: Exception) {
+                            context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                        }
                     }
-                },
-                isServiceOperationLoading = isServiceOperationLoading
-            )
-            1 -> ActivityTab(conversationItems = conversationItems)
+                )
+            }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+// ─── iOS Bottom Tab Bar ───────────────────────────────────────────────────────
+
 @Composable
-fun SetupTab(
-    apiKey: String,
-    onApiKeyChange: (String) -> Unit,
-    onSaveApiKey: () -> Unit,
-    overlayPermission: Boolean,
-    accessibilityPermission: Boolean,
-    serviceRunning: Boolean,
-    onRequestOverlayPermission: () -> Unit,
-    onRequestAccessibilityPermission: () -> Unit,
-    onStartService: () -> Unit,
-    onStopService: () -> Unit,
-    isServiceOperationLoading: Boolean = false
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp)
+fun IOSBottomBar(selectedTab: Int, onTabSelected: (Int) -> Unit) {
+    Surface(
+        color = IOSCardBackground.copy(alpha = 0.94f),
+        shadowElevation = 0.dp,
+        modifier = Modifier.shadow(
+            elevation = 0.5.dp,
+            spotColor = Color.Black.copy(alpha = 0.15f)
+        )
     ) {
-        // API Key Section
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surface
-            )
-        ) {
-            Column(
-                modifier = Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+        Column {
+            Divider(color = IOSSeparator, thickness = 0.5.dp)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp, bottom = 2.dp)
+                    .navigationBarsPadding(),
+                horizontalArrangement = Arrangement.SpaceEvenly
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Key, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        "Claude API Key",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-
-                OutlinedTextField(
-                    value = apiKey,
-                    onValueChange = onApiKeyChange,
-                    modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("sk-ant-api03-...") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    shape = RoundedCornerShape(8.dp)
+                IOSTabItem(
+                    icon = if (selectedTab == 0) Icons.Filled.SmartToy else Icons.Outlined.SmartToy,
+                    label = "Agent",
+                    isSelected = selectedTab == 0,
+                    onClick = { onTabSelected(0) }
                 )
-
-                // Model selection
-                var modelExpanded by remember { mutableStateOf(false) }
-                val secureStorage = SecureStorage.getInstance(LocalContext.current)
-                var selectedModel by remember { mutableStateOf(secureStorage.getModel()) }
-                val modelOptions = mapOf(
-                    "gemini-2.0-flash-exp" to "Gemini 2.0 Flash (Default)",
-                    "gemini-2.0-flash-thinking-exp" to "Gemini 2.0 Flash Thinking",
-                    "gemini-exp-1206" to "Gemini Exp 1206",
-                    "claude-opus-4-5" to "Claude Opus 4.5 (Best)",
-                    "claude-sonnet-4-5" to "Claude Sonnet 4.5 (Fast)"
-                )
-
-                Text(
-                    "Model",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.padding(top = 8.dp)
-                )
-                ExposedDropdownMenuBox(
-                    expanded = modelExpanded,
-                    onExpandedChange = { modelExpanded = it }
-                ) {
-                    OutlinedTextField(
-                        value = modelOptions[selectedModel] ?: "Claude Opus 4.5 (Best)",
-                        onValueChange = {},
-                        readOnly = true,
-                        modifier = Modifier.fillMaxWidth().menuAnchor(),
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = modelExpanded) },
-                        shape = RoundedCornerShape(8.dp)
-                    )
-                    ExposedDropdownMenu(
-                        expanded = modelExpanded,
-                        onDismissRequest = { modelExpanded = false }
-                    ) {
-                        modelOptions.forEach { (model, name) ->
-                            DropdownMenuItem(
-                                text = { Text(name) },
-                                onClick = {
-                                    selectedModel = model
-                                    secureStorage.saveModel(model)
-                                    modelExpanded = false
-                                },
-                                contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
-                            )
-                        }
-                    }
-                }
-
-                // Screenshot quality
-                var qualityExpanded by remember { mutableStateOf(false) }
-                var selectedQuality by remember { mutableStateOf(secureStorage.getScreenshotQuality()) }
-                val qualityOptions = mapOf(
-                    -1 to "Auto (adapts to speed)",
-                    30 to "Low (JPEG 30%, fastest)"
-                )
-
-                Text(
-                    "Screenshot Quality",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.padding(top = 8.dp)
-                )
-                ExposedDropdownMenuBox(
-                    expanded = qualityExpanded,
-                    onExpandedChange = { qualityExpanded = it }
-                ) {
-                    OutlinedTextField(
-                        value = qualityOptions[selectedQuality] ?: "Auto (adapts to speed)",
-                        onValueChange = {},
-                        readOnly = true,
-                        modifier = Modifier.fillMaxWidth().menuAnchor(),
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = qualityExpanded) },
-                        shape = RoundedCornerShape(8.dp)
-                    )
-                    ExposedDropdownMenu(
-                        expanded = qualityExpanded,
-                        onDismissRequest = { qualityExpanded = false }
-                    ) {
-                        qualityOptions.forEach { (quality, name) ->
-                            DropdownMenuItem(
-                                text = { Text(name) },
-                                onClick = {
-                                    selectedQuality = quality
-                                    secureStorage.saveScreenshotQuality(quality)
-                                    qualityExpanded = false
-                                },
-                                contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
-                            )
-                        }
-                    }
-                }
-
-                Button(
-                    onClick = onSaveApiKey,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text("Save API Key")
-                }
-            }
-        }
-
-        // Permissions Section
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surface
-            )
-        ) {
-            Column(
-                modifier = Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Security, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        "Permissions",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-
-                PermissionCard(
-                    title = "Overlay Permission",
-                    description = "Required to show cursor and overlays",
-                    isGranted = overlayPermission,
-                    onClick = onRequestOverlayPermission
-                )
-
-                PermissionCard(
-                    title = "Accessibility Service",
-                    description = "Required to control device",
-                    isGranted = accessibilityPermission,
-                    onClick = onRequestAccessibilityPermission
+                IOSTabItem(
+                    icon = if (selectedTab == 1) Icons.Filled.Settings else Icons.Outlined.Settings,
+                    label = "Settings",
+                    isSelected = selectedTab == 1,
+                    onClick = { onTabSelected(1) }
                 )
             }
         }
+    }
+}
 
-        // Service Control
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = if (serviceRunning)
-                    MaterialTheme.colorScheme.primaryContainer
-                else
-                    MaterialTheme.colorScheme.surface
-            )
-        ) {
-            Column(
-                modifier = Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+@Composable
+fun IOSTabItem(icon: ImageVector, label: String, isSelected: Boolean, onClick: () -> Unit) {
+    val color = if (isSelected) IOSBlue else IOSGray
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .clickable(onClick = onClick)
+            .padding(horizontal = 32.dp, vertical = 4.dp)
+    ) {
+        Icon(icon, contentDescription = label, tint = color, modifier = Modifier.size(24.dp))
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(label, fontSize = 10.sp, color = color, fontWeight = if (isSelected) FontWeight.Medium else FontWeight.Normal)
+    }
+}
+
+// ─── Agent Tab ────────────────────────────────────────────────────────────────
+
+@Composable
+fun AgentTab(
+    serviceRunning: Boolean,
+    accessibilityPermission: Boolean,
+    overlayPermission: Boolean,
+    isServiceOperationLoading: Boolean,
+    conversationItems: List<ConversationItem>,
+    onStartService: () -> Unit,
+    onStopService: () -> Unit
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Status card at top
+        IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (serviceRunning) IOSGreen.copy(alpha = 0.15f) else IOSGray6),
+                    contentAlignment = Alignment.Center
+                ) {
                     Icon(
-                        if (serviceRunning) Icons.Default.CheckCircle else Icons.Default.PlayArrow,
+                        if (serviceRunning) Icons.Default.PlayCircle else Icons.Default.PauseCircle,
                         contentDescription = null,
-                        tint = if (serviceRunning) Color(0xFF4CAF50) else MaterialTheme.colorScheme.primary
+                        tint = if (serviceRunning) IOSGreen else IOSGray,
+                        modifier = Modifier.size(24.dp)
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Spacer(modifier = Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        if (serviceRunning) "Service Running" else "Service Stopped",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold
+                        if (serviceRunning) "Running" else "Stopped",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 17.sp,
+                        color = IOSLabel
+                    )
+                    Text(
+                        if (serviceRunning) "Tap 'Start Agent' in notification"
+                        else if (!accessibilityPermission || !overlayPermission) "Grant permissions in Settings"
+                        else "Ready to start",
+                        fontSize = 13.sp,
+                        color = IOSSecondaryLabel
                     )
                 }
+            }
 
-                Text(
-                    if (serviceRunning)
-                        "Tap 'Start Agent' in the notification to begin automation"
-                    else
-                        "Start the service to enable the agent",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                )
+            Divider(color = IOSSeparator, modifier = Modifier.padding(start = 74.dp))
 
-                // Screen capture tip
-                if (!serviceRunning) {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)
-                        ),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.Top
-                        ) {
-                            Icon(
-                                Icons.Default.Info,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column {
-                                Text(
-                                    "Screen Capture Tip",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                                Text(
-                                    "When starting, choose 'Entire screen' in the dialog. Android will remember your choice for future sessions.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                                )
-                            }
-                        }
+            // Start/Stop button
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = !isServiceOperationLoading) {
+                        if (serviceRunning) onStopService() else onStartService()
                     }
-                }
-
-                if (serviceRunning) {
-                    Button(
-                        onClick = onStopService,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 56.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFFD32F2F)
-                        ),
-                        shape = RoundedCornerShape(8.dp),
-                        contentPadding = PaddingValues(vertical = 16.dp, horizontal = 24.dp),
-                        enabled = !isServiceOperationLoading
-                    ) {
-                        Row(
-                            horizontalArrangement = Arrangement.Center,
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            if (isServiceOperationLoading) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(24.dp),
-                                    color = Color.White,
-                                    strokeWidth = 2.dp
-                                )
-                            } else {
-                                Icon(
-                                    Icons.Default.Stop,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                if (isServiceOperationLoading) "Stopping..." else "Stop Service",
-                                style = MaterialTheme.typography.bodyLarge,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-                    }
+                    .padding(16.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                if (isServiceOperationLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        color = IOSBlue,
+                        strokeWidth = 2.dp
+                    )
                 } else {
-                    Button(
-                        onClick = onStartService,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 56.dp),
-                        shape = RoundedCornerShape(8.dp),
-                        contentPadding = PaddingValues(vertical = 16.dp, horizontal = 24.dp),
-                        enabled = !isServiceOperationLoading
-                    ) {
-                        Row(
-                            horizontalArrangement = Arrangement.Center,
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            if (isServiceOperationLoading) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(24.dp),
-                                    color = Color.White,
-                                    strokeWidth = 2.dp
-                                )
-                            } else {
-                                Icon(
-                                    Icons.Default.PlayArrow,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                if (isServiceOperationLoading) "Starting..." else "Start Service",
-                                style = MaterialTheme.typography.bodyLarge,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-                    }
+                    Text(
+                        if (serviceRunning) "Stop Service" else "Start Service",
+                        color = if (serviceRunning) IOSRed else IOSBlue,
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 17.sp
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        // Activity feed
+        if (conversationItems.isEmpty()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 60.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Icon(
+                    Icons.Default.Forum,
+                    contentDescription = null,
+                    modifier = Modifier.size(52.dp),
+                    tint = IOSTertiaryLabel
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text("No Activity", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = IOSSecondaryLabel)
+                Text(
+                    "Start the agent to see activity here",
+                    fontSize = 15.sp,
+                    color = IOSTertiaryLabel,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
+        } else {
+            Text(
+                "RECENT ACTIVITY",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Normal,
+                color = IOSSecondaryLabel,
+                modifier = Modifier.padding(start = 32.dp, bottom = 6.dp)
+            )
+            LazyColumn(
+                modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(0.dp)
+            ) {
+                items(conversationItems.reversed()) { item ->
+                    ActivityRow(item)
                 }
             }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PermissionCard(
-    title: String,
-    description: String,
-    isGranted: Boolean,
-    onClick: () -> Unit
-) {
+fun ActivityRow(item: ConversationItem) {
     var expanded by remember { mutableStateOf(false) }
-
-    // Define instructions based on title
-    val instructions = when {
-        title.contains("Accessibility") -> listOf(
-            "1. Tap this card to open Accessibility Settings",
-            "2. Look for 'Agent Relay' or 'Installed apps' section",
-            "3. Tap on 'Agent Relay'",
-            "4. Toggle the switch to ON",
-            "5. Confirm when prompted"
-        )
-        title.contains("Overlay") -> listOf(
-            "1. Tap this card to open settings",
-            "2. Find 'Agent Relay' in the list",
-            "3. Toggle 'Allow display over other apps' to ON"
-        )
-        else -> null
+    val iconColor = when (item.type) {
+        ConversationItem.ItemType.ERROR -> IOSRed
+        ConversationItem.ItemType.ACTION_EXECUTED -> IOSGreen
+        ConversationItem.ItemType.SCREENSHOT_CAPTURED -> IOSOrange
+        else -> IOSBlue
+    }
+    val icon = when (item.type) {
+        ConversationItem.ItemType.SCREENSHOT_CAPTURED -> Icons.Default.PhotoCamera
+        ConversationItem.ItemType.API_REQUEST -> Icons.Default.ArrowUpward
+        ConversationItem.ItemType.API_RESPONSE -> Icons.Default.SmartToy
+        ConversationItem.ItemType.ACTION_EXECUTED -> Icons.Default.CheckCircle
+        ConversationItem.ItemType.ERROR -> Icons.Default.ErrorOutline
     }
 
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = if (isGranted)
-                Color(0xFF1B3A1B)
-            else
-                MaterialTheme.colorScheme.background
-        ),
-        shape = RoundedCornerShape(8.dp)
+    Surface(
+        color = IOSCardBackground,
+        shape = RoundedCornerShape(0.dp)
     ) {
         Column {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(onClick = onClick)
-                    .padding(16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = 16.dp, vertical = 11.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .background(iconColor.copy(alpha = 0.12f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(icon, contentDescription = null, tint = iconColor, modifier = Modifier.size(16.dp))
+                }
+                Spacer(modifier = Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        title,
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.Medium
+                        item.status,
+                        fontSize = 15.sp,
+                        color = IOSLabel,
+                        maxLines = if (expanded) Int.MAX_VALUE else 1
                     )
-                    Text(
-                        description,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                    )
+                    if (item.actionDescription != null && !expanded) {
+                        Text(item.actionDescription, fontSize = 13.sp, color = IOSSecondaryLabel, maxLines = 1)
+                    }
                 }
                 Icon(
-                    if (isGranted) Icons.Default.CheckCircle else Icons.Default.Error,
+                    if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
                     contentDescription = null,
-                    tint = if (isGranted) Color(0xFF4CAF50) else Color(0xFFF44336)
+                    tint = IOSGray2,
+                    modifier = Modifier.size(18.dp)
                 )
             }
 
-            // Show instructions button if not granted
-            if (!isGranted && instructions != null) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { expanded = !expanded }
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        if (expanded) "Hide instructions" else "Show instructions",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-
-                if (expanded) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp)
-                            .background(
-                                color = MaterialTheme.colorScheme.background.copy(alpha = 0.5f),
-                                shape = RoundedCornerShape(8.dp)
-                            )
-                            .padding(12.dp)
-                    ) {
-                        instructions.forEach { instruction ->
-                            Text(
-                                instruction,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                                modifier = Modifier.padding(vertical = 2.dp)
+            if (expanded) {
+                Column(modifier = Modifier.padding(start = 58.dp, end = 16.dp, bottom = 12.dp)) {
+                    item.actionDescription?.let {
+                        Text("Action: $it", fontSize = 13.sp, color = IOSBlue)
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+                    item.response?.let {
+                        Text("Response: $it", fontSize = 13.sp, color = IOSSecondaryLabel)
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+                    item.prompt?.let {
+                        Text("Prompt: $it", fontSize = 13.sp, color = IOSSecondaryLabel)
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+                    item.screenshot?.let { screenshot ->
+                        Text(
+                            "Screenshot (${item.screenshotWidth}x${item.screenshotHeight})",
+                            fontSize = 12.sp, color = IOSTertiaryLabel, fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        val imageBitmap = remember(screenshot) {
+                            try {
+                                val imageBytes = Base64.decode(screenshot, Base64.DEFAULT)
+                                BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)?.asImageBitmap()
+                            } catch (e: Exception) { null }
+                        }
+                        if (imageBitmap != null) {
+                            Image(
+                                bitmap = imageBitmap,
+                                contentDescription = "Screenshot",
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(180.dp)
+                                    .clip(RoundedCornerShape(8.dp)),
+                                contentScale = ContentScale.Fit
                             )
                         }
                     }
                 }
             }
+
+            Divider(color = IOSSeparator, modifier = Modifier.padding(start = 58.dp))
         }
     }
 }
 
+// ─── Settings Tab ─────────────────────────────────────────────────────────────
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ActivityTab(conversationItems: List<ConversationItem>) {
-    var expandedItems by remember { mutableStateOf(setOf<Long>()) }
-    var expandedScreenshot by remember { mutableStateOf<String?>(null) }
+fun SettingsTab(
+    apiKey: String,
+    onApiKeyChange: (String) -> Unit,
+    onSaveApiKey: () -> Unit,
+    overlayPermission: Boolean,
+    accessibilityPermission: Boolean,
+    onRequestOverlayPermission: () -> Unit,
+    onRequestAccessibilityPermission: () -> Unit
+) {
+    val context = LocalContext.current
+    val secureStorage = remember { SecureStorage.getInstance(context) }
 
-    LazyColumn(
+    Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
-        reverseLayout = true,
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+            .verticalScroll(rememberScrollState())
+            .padding(bottom = 32.dp)
     ) {
-        items(conversationItems.reversed()) { item ->
-            val isExpanded = expandedItems.contains(item.timestamp)
-            val icon = when (item.type) {
-                ConversationItem.ItemType.SCREENSHOT_CAPTURED -> Icons.Default.PhotoCamera
-                ConversationItem.ItemType.API_REQUEST -> Icons.Default.Send
-                ConversationItem.ItemType.API_RESPONSE -> Icons.Default.SmartToy
-                ConversationItem.ItemType.ACTION_EXECUTED -> Icons.Default.CheckCircle
-                ConversationItem.ItemType.ERROR -> Icons.Default.Error
-            }
-            val iconColor = when (item.type) {
-                ConversationItem.ItemType.ERROR -> Color(0xFFF44336)
-                ConversationItem.ItemType.ACTION_EXECUTED -> Color(0xFF4CAF50)
-                else -> MaterialTheme.colorScheme.primary
-            }
-
-            Card(
-                onClick = {
-                    expandedItems = if (isExpanded) {
-                        expandedItems - item.timestamp
+        // ── Permissions Section ──
+        IOSSectionHeader("PERMISSIONS")
+        IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            IOSSettingsRow(
+                icon = Icons.Default.Accessibility,
+                iconBackground = IOSBlue,
+                title = "Accessibility Service",
+                subtitle = if (accessibilityPermission) "Enabled" else "Tap to open Installed Apps",
+                trailing = {
+                    if (accessibilityPermission) {
+                        Icon(Icons.Default.CheckCircle, contentDescription = null, tint = IOSGreen, modifier = Modifier.size(22.dp))
                     } else {
-                        expandedItems + item.timestamp
+                        Icon(Icons.Default.ChevronRight, contentDescription = null, tint = IOSGray2, modifier = Modifier.size(22.dp))
                     }
                 },
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                ),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Column(
-                    modifier = Modifier.padding(12.dp)
+                onClick = onRequestAccessibilityPermission
+            )
+            Divider(color = IOSSeparator, modifier = Modifier.padding(start = 58.dp))
+            IOSSettingsRow(
+                icon = Icons.Default.Layers,
+                iconBackground = IOSOrange,
+                title = "Display Over Apps",
+                subtitle = if (overlayPermission) "Enabled" else "Required for overlays",
+                trailing = {
+                    if (overlayPermission) {
+                        Icon(Icons.Default.CheckCircle, contentDescription = null, tint = IOSGreen, modifier = Modifier.size(22.dp))
+                    } else {
+                        Icon(Icons.Default.ChevronRight, contentDescription = null, tint = IOSGray2, modifier = Modifier.size(22.dp))
+                    }
+                },
+                onClick = onRequestOverlayPermission
+            )
+        }
+
+        if (!accessibilityPermission) {
+            Text(
+                "Go to Accessibility > Installed apps > Agent Relay, then toggle on.",
+                fontSize = 13.sp,
+                color = IOSSecondaryLabel,
+                modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 6.dp),
+                lineHeight = 18.sp
+            )
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // ── API Key Section ──
+        IOSSectionHeader("API KEY")
+        IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                OutlinedTextField(
+                    value = apiKey,
+                    onValueChange = onApiKeyChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("sk-ant-api03-...", color = IOSTertiaryLabel) },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    shape = RoundedCornerShape(10.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = IOSBlue,
+                        unfocusedBorderColor = IOSGray4,
+                        cursorColor = IOSBlue,
+                        focusedContainerColor = Color.White,
+                        unfocusedContainerColor = Color.White
+                    )
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = onSaveApiKey,
+                    modifier = Modifier.fillMaxWidth().height(44.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = IOSBlue)
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.Top
-                    ) {
-                        Icon(
-                            icon,
-                            contentDescription = null,
-                            tint = iconColor,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                item.status,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                fontWeight = FontWeight.Medium
-                            )
-                            if (item.actionDescription != null && !isExpanded) {
-                                Text(
-                                    item.actionDescription,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                                )
-                            }
-                        }
-                        Icon(
-                            if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-
-                    if (isExpanded) {
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        item.actionDescription?.let {
-                            Text(
-                                "Action: $it",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                        }
-
-                        item.response?.let {
-                            Text(
-                                "Response: $it",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                        }
-
-                        item.prompt?.let {
-                            Text(
-                                "Prompt: $it",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                        }
-
-                        item.screenshot?.let { screenshot ->
-                            Text(
-                                "Screenshot (${item.screenshotWidth}x${item.screenshotHeight})",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-
-                            // Decode and display the screenshot
-                            val imageBitmap = remember(screenshot) {
-                                try {
-                                    val imageBytes = Base64.decode(screenshot, Base64.DEFAULT)
-                                    BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)?.asImageBitmap()
-                                } catch (e: Exception) {
-                                    null
-                                }
-                            }
-
-                            if (imageBitmap != null) {
-                                Image(
-                                    bitmap = imageBitmap,
-                                    contentDescription = "Screenshot",
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(200.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .clickable {
-                                            expandedScreenshot = screenshot
-                                        },
-                                    contentScale = ContentScale.Fit
-                                )
-                            } else {
-                                Text(
-                                    "Failed to load screenshot",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.error
-                                )
-                            }
-                        }
-                    }
+                    Text("Save", fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
                 }
             }
         }
 
-        if (conversationItems.isEmpty()) {
-            item {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(32.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Icon(
-                        Icons.Default.Info,
-                        contentDescription = null,
-                        modifier = Modifier.size(48.dp),
-                        tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        "No activity yet",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                    )
-                    Text(
-                        "Start the agent to see detailed conversation history",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
-                    )
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // ── Model Section ──
+        IOSSectionHeader("MODEL")
+        IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            var selectedModel by remember { mutableStateOf(secureStorage.getModel()) }
+            val modelOptions = listOf(
+                "gemini-2.0-flash-exp" to "Gemini 2.0 Flash",
+                "gemini-2.0-flash-thinking-exp" to "Gemini 2.0 Flash Thinking",
+                "gemini-exp-1206" to "Gemini Exp 1206",
+                "claude-opus-4-5" to "Claude Opus 4.5",
+                "claude-sonnet-4-5" to "Claude Sonnet 4.5"
+            )
+
+            modelOptions.forEachIndexed { index, (modelId, modelName) ->
+                IOSSettingsRow(
+                    title = modelName,
+                    trailing = {
+                        if (selectedModel == modelId) {
+                            Icon(Icons.Default.Check, contentDescription = null, tint = IOSBlue, modifier = Modifier.size(20.dp))
+                        }
+                    },
+                    onClick = {
+                        selectedModel = modelId
+                        secureStorage.saveModel(modelId)
+                    }
+                )
+                if (index < modelOptions.lastIndex) {
+                    Divider(color = IOSSeparator, modifier = Modifier.padding(start = 16.dp))
                 }
             }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // ── Screenshot Quality Section ──
+        IOSSectionHeader("SCREENSHOT QUALITY")
+        IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            var selectedQuality by remember { mutableStateOf(secureStorage.getScreenshotQuality()) }
+            val qualityOptions = listOf(
+                -1 to "Auto",
+                30 to "Low (fastest)"
+            )
+
+            qualityOptions.forEachIndexed { index, (quality, name) ->
+                IOSSettingsRow(
+                    title = name,
+                    trailing = {
+                        if (selectedQuality == quality) {
+                            Icon(Icons.Default.Check, contentDescription = null, tint = IOSBlue, modifier = Modifier.size(20.dp))
+                        }
+                    },
+                    onClick = {
+                        selectedQuality = quality
+                        secureStorage.saveScreenshotQuality(quality)
+                    }
+                )
+                if (index < qualityOptions.lastIndex) {
+                    Divider(color = IOSSeparator, modifier = Modifier.padding(start = 16.dp))
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // ── Semantic Pipeline Section ──
+        IOSSectionHeader("SEMANTIC PIPELINE")
+        IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            var verificationEnabled by remember { mutableStateOf(secureStorage.getVerificationEnabled()) }
+
+            IOSSettingsRow(
+                icon = Icons.Default.Verified,
+                iconBackground = IOSGreen,
+                title = "Pre-Execution Verification",
+                subtitle = if (verificationEnabled) "Uses Haiku to verify UI" else "Disabled",
+                trailing = {
+                    Switch(
+                        checked = verificationEnabled,
+                        onCheckedChange = {
+                            verificationEnabled = it
+                            secureStorage.setVerificationEnabled(it)
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = IOSGreen
+                        )
+                    )
+                }
+            )
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // ── OCR Section ──
+        IOSSectionHeader("OCR (OPTIONAL)")
+        IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            var ocrEnabled by remember { mutableStateOf(secureStorage.getOcrEnabled()) }
+            var googleVisionKey by remember { mutableStateOf(secureStorage.getGoogleVisionApiKey() ?: "") }
+            var replicateToken by remember { mutableStateOf(secureStorage.getReplicateApiToken() ?: "") }
+
+            IOSSettingsRow(
+                icon = Icons.Default.TextFields,
+                iconBackground = IOSOrange,
+                title = "Enable OCR",
+                subtitle = "For WebViews and custom UIs",
+                trailing = {
+                    Switch(
+                        checked = ocrEnabled,
+                        onCheckedChange = {
+                            ocrEnabled = it
+                            secureStorage.setOcrEnabled(it)
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = IOSGreen
+                        )
+                    )
+                }
+            )
+
+            if (ocrEnabled) {
+                Divider(color = IOSSeparator, modifier = Modifier.padding(start = 58.dp))
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Google Vision API Key", fontSize = 13.sp, color = IOSSecondaryLabel)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = googleVisionKey,
+                        onValueChange = { googleVisionKey = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("AIza...", color = IOSTertiaryLabel) },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        shape = RoundedCornerShape(10.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = IOSBlue,
+                            unfocusedBorderColor = IOSGray4,
+                            cursorColor = IOSBlue,
+                            focusedContainerColor = Color.White,
+                            unfocusedContainerColor = Color.White
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            secureStorage.saveGoogleVisionApiKey(googleVisionKey)
+                            Toast.makeText(context, "Google Vision key saved", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.fillMaxWidth().height(40.dp),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = IOSBlue)
+                    ) {
+                        Text("Save", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Replicate API Token (fallback)", fontSize = 13.sp, color = IOSSecondaryLabel)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = replicateToken,
+                        onValueChange = { replicateToken = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("r8_...", color = IOSTertiaryLabel) },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        shape = RoundedCornerShape(10.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = IOSBlue,
+                            unfocusedBorderColor = IOSGray4,
+                            cursorColor = IOSBlue,
+                            focusedContainerColor = Color.White,
+                            unfocusedContainerColor = Color.White
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            secureStorage.saveReplicateApiToken(replicateToken)
+                            Toast.makeText(context, "Replicate token saved", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.fillMaxWidth().height(40.dp),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = IOSBlue)
+                    ) {
+                        Text("Save", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                    }
+                }
+            }
+        }
+        Text(
+            "OCR enriches the element map for WebViews, games, and custom-rendered UIs.",
+            fontSize = 13.sp,
+            color = IOSSecondaryLabel,
+            modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 6.dp),
+            lineHeight = 18.sp
+        )
+    }
+}
+
+// ─── iOS-style Reusable Components ────────────────────────────────────────────
+
+@Composable
+fun IOSSectionHeader(title: String) {
+    Text(
+        title,
+        fontSize = 13.sp,
+        fontWeight = FontWeight.Normal,
+        color = IOSSecondaryLabel,
+        modifier = Modifier.padding(start = 32.dp, bottom = 6.dp, top = 4.dp)
+    )
+}
+
+@Composable
+fun IOSGroupedCard(
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = IOSCardBackground,
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Column {
+            content()
         }
     }
+}
 
-    // Expanded screenshot dialog
-    expandedScreenshot?.let { screenshot ->
-        androidx.compose.ui.window.Dialog(
-            onDismissRequest = { expandedScreenshot = null }
-        ) {
+@Composable
+fun IOSSettingsRow(
+    title: String,
+    subtitle: String? = null,
+    icon: ImageVector? = null,
+    iconBackground: Color = IOSBlue,
+    trailing: @Composable (() -> Unit)? = null,
+    onClick: (() -> Unit)? = null
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 16.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (icon != null) {
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.9f))
-                    .clickable { expandedScreenshot = null },
+                    .size(30.dp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(iconBackground),
                 contentAlignment = Alignment.Center
             ) {
-                val imageBitmap = remember(screenshot) {
-                    try {
-                        val imageBytes = Base64.decode(screenshot, Base64.DEFAULT)
-                        BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)?.asImageBitmap()
-                    } catch (e: Exception) {
-                        null
-                    }
-                }
-
-                if (imageBitmap != null) {
-                    Column(
-                        modifier = Modifier.fillMaxSize(),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        // Close button at top
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp),
-                            horizontalArrangement = Arrangement.End
-                        ) {
-                            IconButton(
-                                onClick = { expandedScreenshot = null },
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .background(
-                                        color = MaterialTheme.colorScheme.surface,
-                                        shape = CircleShape
-                                    )
-                            ) {
-                                Icon(
-                                    Icons.Default.Close,
-                                    contentDescription = "Close",
-                                    tint = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                        }
-
-                        // Expanded image
-                        Image(
-                            bitmap = imageBitmap,
-                            contentDescription = "Expanded Screenshot",
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .weight(1f)
-                                .padding(16.dp),
-                            contentScale = ContentScale.Fit
-                        )
-                    }
-                }
+                Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, fontSize = 17.sp, color = IOSLabel)
+            if (subtitle != null) {
+                Text(subtitle, fontSize = 13.sp, color = IOSSecondaryLabel)
             }
         }
+        trailing?.invoke()
     }
 }

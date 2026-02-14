@@ -75,3 +75,67 @@ data class ActionWithDescription(
     val action: AgentAction,
     val description: String
 )
+
+// ─── Semantic Element-Based Action Models ────────────────────────────────────
+
+enum class ElementType {
+    BUTTON, INPUT, TEXT, IMAGE, SWITCH, CHECKBOX, LIST_ITEM, TAB, ICON, LINK, UNKNOWN
+}
+
+enum class ElementSource {
+    ACCESSIBILITY_TREE, OCR, MERGED
+}
+
+data class UIElement(
+    val id: String,
+    val type: ElementType,
+    val text: String,
+    val bounds: android.graphics.Rect,
+    val isClickable: Boolean = false,
+    val isFocusable: Boolean = false,
+    val isScrollable: Boolean = false,
+    val isChecked: Boolean = false,
+    val relativePosition: String = "",
+    val source: ElementSource = ElementSource.ACCESSIBILITY_TREE
+)
+
+data class ElementMap(
+    val elements: List<UIElement>,
+    val screenWidth: Int,
+    val screenHeight: Int,
+    val timestamp: Long = System.currentTimeMillis()
+) {
+    fun findById(id: String): UIElement? = elements.find { it.id == id }
+
+    fun toTextRepresentation(): String = buildString {
+        appendLine("ELEMENT MAP (${screenWidth}x${screenHeight}):")
+        for (el in elements) {
+            val flags = mutableListOf<String>()
+            if (el.isClickable) flags.add("clickable")
+            if (el.isFocusable) flags.add("focusable")
+            if (el.isScrollable) flags.add("scrollable")
+            if (el.isChecked) flags.add("checked")
+            val flagStr = if (flags.isNotEmpty()) " ${flags.joinToString(",")}" else ""
+            val textStr = if (el.text.isNotBlank()) " \"${el.text}\"" else ""
+            val posStr = if (el.relativePosition.isNotBlank()) " ${el.relativePosition}" else ""
+            appendLine("[${el.id}] ${el.type}$textStr$flagStr (${el.bounds.left},${el.bounds.top},${el.bounds.right},${el.bounds.bottom})$posStr")
+        }
+    }
+}
+
+enum class SemanticAction {
+    CLICK, TYPE, SWIPE, BACK, HOME, WAIT, COMPLETE
+}
+
+data class SemanticStep(
+    val action: SemanticAction,
+    val element: String? = null,
+    val text: String? = null,
+    val direction: String? = null,
+    val description: String = ""
+)
+
+data class SemanticActionPlan(
+    val steps: List<SemanticStep>,
+    val reasoning: String = ""
+)

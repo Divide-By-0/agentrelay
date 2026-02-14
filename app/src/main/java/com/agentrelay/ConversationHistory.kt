@@ -32,13 +32,13 @@ data class ConversationItem(
 }
 
 object ConversationHistoryManager {
-    private val history = mutableListOf<ConversationItem>()
-    private val listeners = mutableListOf<(List<ConversationItem>) -> Unit>()
+    private val history = java.util.concurrent.CopyOnWriteArrayList<ConversationItem>()
+    private val listeners = java.util.concurrent.CopyOnWriteArrayList<(List<ConversationItem>) -> Unit>()
 
     fun add(item: ConversationItem) {
         history.add(item)
         // Keep only last 100 items
-        if (history.size > 100) {
+        while (history.size > 100) {
             history.removeAt(0)
         }
         notifyListeners()

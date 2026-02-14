@@ -6,6 +6,7 @@ import android.content.Context
 import android.graphics.Path
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -43,9 +44,15 @@ class AutomationService : AccessibilityService() {
 
             // Get display info for debugging
             val windowManager = getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
-            val metrics = android.util.DisplayMetrics()
-            windowManager.defaultDisplay.getRealMetrics(metrics)
-            Log.d(TAG, "Display: ${metrics.widthPixels}x${metrics.heightPixels}, density: ${metrics.densityDpi}")
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                val bounds = windowManager.currentWindowMetrics.bounds
+                Log.d(TAG, "Display: ${bounds.width()}x${bounds.height()}")
+            } else {
+                val metrics = android.util.DisplayMetrics()
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay.getRealMetrics(metrics)
+                Log.d(TAG, "Display: ${metrics.widthPixels}x${metrics.heightPixels}, density: ${metrics.densityDpi}")
+            }
 
             val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
             val gestureBuilder = GestureDescription.Builder()
@@ -143,6 +150,15 @@ class AutomationService : AccessibilityService() {
 
     suspend fun performHome(): Boolean {
         return performGlobalAction(GLOBAL_ACTION_HOME)
+    }
+
+    fun getRootNode(): AccessibilityNodeInfo? {
+        return try {
+            rootInActiveWindow
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get root node", e)
+            null
+        }
     }
 
     companion object {

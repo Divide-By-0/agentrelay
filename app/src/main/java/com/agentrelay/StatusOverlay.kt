@@ -374,7 +374,7 @@ class StatusOverlay(private val context: Context) {
 }
 
 object StatusBroadcaster {
-    private val listeners = mutableListOf<(String) -> Unit>()
+    private val listeners = java.util.concurrent.CopyOnWriteArrayList<(String) -> Unit>()
 
     fun addListener(listener: (String) -> Unit) {
         listeners.add(listener)

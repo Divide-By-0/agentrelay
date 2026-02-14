@@ -4,6 +4,7 @@ import android.util.Log
 import com.agentrelay.models.*
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
+import com.google.gson.JsonArray
 import com.google.gson.JsonDeserializer
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
@@ -103,6 +104,129 @@ class ClaudeAPIClient(
         }
     }
 
+    suspend fun sendWithElementMap(
+        screenshotInfo: ScreenshotInfo,
+        elementMap: ElementMap,
+        userTask: String,
+        conversationHistory: List<Message>
+    ): Result<SemanticActionPlan> {
+        val elementMapText = elementMap.toTextRepresentation()
+
+        val systemPrompt = """
+            You are an Android automation agent. You receive a screenshot and a structured ELEMENT MAP of the current screen.
+            Use the element map to identify UI elements by their IDs and issue actions referencing those IDs.
+
+            ${elementMapText}
+
+            CRITICAL: Be CONCISE. Descriptions should be 3-7 words max. Get to the goal efficiently.
+
+            Respond with a JSON object containing:
+            - "steps": array of action objects, each with:
+              - "action": one of "click", "type", "swipe", "back", "home", "wait", "complete"
+              - "element": element ID from the map (e.g. "btn_1") — required for click/type
+              - "text": text to type (for type action only)
+              - "direction": "up", "down", "left", "right" (for swipe only)
+              - "description": brief description (3-7 words)
+            - "reasoning": brief explanation of your plan
+
+            Example response:
+            {"steps": [{"action": "click", "element": "input_1", "description": "Tap search field"}, {"action": "type", "element": "input_1", "text": "weather", "description": "Type search query"}], "reasoning": "Need to search for weather"}
+
+            Rules:
+            1. Respond with ONLY valid JSON (no markdown, no explanation outside JSON)
+            2. Reference elements by their IDs from the element map
+            3. You may return multiple sequential steps
+            4. For click/type, the "element" field is REQUIRED
+            5. Use "complete" with a "description" when the task is done or impossible
+            6. If stuck, try "back" or report completion
+            7. Keep descriptions brief and action-focused
+
+            User task: $userTask
+
+            Respond with ONLY a JSON object.
+        """.trimIndent()
+
+        val messages = conversationHistory.toMutableList()
+        messages.add(
+            Message(
+                role = "user",
+                content = listOf(
+                    ContentBlock.ImageContent(
+                        source = ImageSource(
+                            data = screenshotInfo.base64Data,
+                            mediaType = screenshotInfo.mediaType
+                        )
+                    ),
+                    ContentBlock.TextContent(text = "Element map and screenshot above. What should I do next?")
+                )
+            )
+        )
+
+        return sendMessage(messages, systemPrompt).mapCatching { response ->
+            val text = response.content.firstOrNull()?.text
+                ?: throw Exception("No text in response")
+            parseSemanticActionPlan(text)
+        }
+    }
+
+    private fun parseSemanticActionPlan(jsonText: String): SemanticActionPlan {
+        return try {
+            var cleanJson = jsonText.trim()
+
+            // Remove markdown code blocks
+            if (cleanJson.contains("```json")) {
+                cleanJson = cleanJson.substringAfter("```json").substringBefore("```").trim()
+            } else if (cleanJson.contains("```")) {
+                cleanJson = cleanJson.substringAfter("```").substringBefore("```").trim()
+            }
+
+            val startIndex = cleanJson.indexOf('{')
+            val endIndex = cleanJson.lastIndexOf('}')
+            if (startIndex >= 0 && endIndex > startIndex) {
+                cleanJson = cleanJson.substring(startIndex, endIndex + 1)
+            }
+
+            val json = JsonParser.parseString(cleanJson).asJsonObject
+            val reasoning = json.get("reasoning")?.asString ?: ""
+
+            val stepsArray = json.getAsJsonArray("steps") ?: JsonArray()
+            val steps = stepsArray.map { stepJson ->
+                val step = stepJson.asJsonObject
+                val actionStr = step.get("action")?.asString ?: "complete"
+                SemanticStep(
+                    action = when (actionStr) {
+                        "click" -> SemanticAction.CLICK
+                        "type" -> SemanticAction.TYPE
+                        "swipe" -> SemanticAction.SWIPE
+                        "back" -> SemanticAction.BACK
+                        "home" -> SemanticAction.HOME
+                        "wait" -> SemanticAction.WAIT
+                        "complete" -> SemanticAction.COMPLETE
+                        else -> SemanticAction.COMPLETE
+                    },
+                    element = step.get("element")?.asString,
+                    text = step.get("text")?.asString,
+                    direction = step.get("direction")?.asString,
+                    description = step.get("description")?.asString ?: ""
+                )
+            }
+
+            SemanticActionPlan(steps = steps, reasoning = reasoning)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse semantic plan from: $jsonText", e)
+            SemanticActionPlan(
+                steps = listOf(
+                    SemanticStep(
+                        action = SemanticAction.COMPLETE,
+                        description = "Failed to parse: ${e.message}"
+                    )
+                ),
+                reasoning = "Parse error"
+            )
+        }
+    }
+
+    @Deprecated("Use sendWithElementMap for semantic element-based actions")
     suspend fun sendWithScreenshot(
         screenshotInfo: ScreenshotInfo,
         userTask: String,

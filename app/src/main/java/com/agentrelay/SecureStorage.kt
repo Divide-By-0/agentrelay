@@ -7,17 +7,44 @@ import androidx.security.crypto.MasterKey
 
 class SecureStorage(context: Context) {
 
-    private val masterKey = MasterKey.Builder(context)
-        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-        .build()
+    private val sharedPreferences: SharedPreferences = try {
+        val masterKey = MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
 
-    private val sharedPreferences: SharedPreferences = EncryptedSharedPreferences.create(
-        context,
-        "encrypted_prefs",
-        masterKey,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-    )
+        EncryptedSharedPreferences.create(
+            context,
+            "encrypted_prefs",
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    } catch (e: Exception) {
+        // KeyStore can get corrupted after OS updates or backup/restore.
+        // Delete the corrupted prefs file and retry once.
+        android.util.Log.e("SecureStorage", "EncryptedSharedPreferences failed, resetting", e)
+        context.getSharedPreferences("encrypted_prefs", Context.MODE_PRIVATE).edit().clear().apply()
+        try {
+            val file = java.io.File(context.filesDir?.parent, "shared_prefs/encrypted_prefs.xml")
+            if (file.exists()) file.delete()
+        } catch (_: Exception) {}
+        try {
+            val masterKey = MasterKey.Builder(context)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+            EncryptedSharedPreferences.create(
+                context,
+                "encrypted_prefs",
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+        } catch (e2: Exception) {
+            // Last resort: fall back to unencrypted prefs so the app doesn't crash
+            android.util.Log.e("SecureStorage", "Falling back to plain SharedPreferences", e2)
+            context.getSharedPreferences("agent_relay_fallback_prefs", Context.MODE_PRIVATE)
+        }
+    }
 
     fun saveApiKey(apiKey: String) {
         sharedPreferences.edit().putString(KEY_API_KEY, apiKey).apply()
@@ -65,11 +92,47 @@ class SecureStorage(context: Context) {
         return sharedPreferences.getFloat(KEY_LAST_UPLOAD_SPEED, 0f)
     }
 
+    fun saveGoogleVisionApiKey(key: String) {
+        sharedPreferences.edit().putString(KEY_GOOGLE_VISION_API_KEY, key).apply()
+    }
+
+    fun getGoogleVisionApiKey(): String? {
+        return sharedPreferences.getString(KEY_GOOGLE_VISION_API_KEY, null)
+    }
+
+    fun saveReplicateApiToken(token: String) {
+        sharedPreferences.edit().putString(KEY_REPLICATE_API_TOKEN, token).apply()
+    }
+
+    fun getReplicateApiToken(): String? {
+        return sharedPreferences.getString(KEY_REPLICATE_API_TOKEN, null)
+    }
+
+    fun setOcrEnabled(enabled: Boolean) {
+        sharedPreferences.edit().putBoolean(KEY_OCR_ENABLED, enabled).apply()
+    }
+
+    fun getOcrEnabled(): Boolean {
+        return sharedPreferences.getBoolean(KEY_OCR_ENABLED, false) // Default off until keys configured
+    }
+
+    fun setVerificationEnabled(enabled: Boolean) {
+        sharedPreferences.edit().putBoolean(KEY_VERIFICATION_ENABLED, enabled).apply()
+    }
+
+    fun getVerificationEnabled(): Boolean {
+        return sharedPreferences.getBoolean(KEY_VERIFICATION_ENABLED, true)
+    }
+
     companion object {
         private const val KEY_API_KEY = "claude_api_key"
         private const val KEY_MODEL = "claude_model"
         private const val KEY_SCREENSHOT_QUALITY = "screenshot_quality"
         private const val KEY_LAST_UPLOAD_SPEED = "last_upload_speed"
+        private const val KEY_GOOGLE_VISION_API_KEY = "google_vision_api_key"
+        private const val KEY_REPLICATE_API_TOKEN = "replicate_api_token"
+        private const val KEY_OCR_ENABLED = "ocr_enabled"
+        private const val KEY_VERIFICATION_ENABLED = "verification_enabled"
 
         @Volatile
         private var INSTANCE: SecureStorage? = null

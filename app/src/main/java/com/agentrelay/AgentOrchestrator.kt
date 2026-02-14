@@ -4,7 +4,7 @@ import android.content.Context
 import android.util.Log
 import android.widget.Toast
 import com.agentrelay.models.*
-import com.agentrelay.OCRClient
+import com.agentrelay.ocr.OCRClient
 import kotlinx.coroutines.*
 
 class AgentOrchestrator(private val context: Context) {

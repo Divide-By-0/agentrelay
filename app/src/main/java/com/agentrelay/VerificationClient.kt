@@ -79,9 +79,10 @@ class VerificationClient(
         plan: SemanticActionPlan,
         step: SemanticStep
     ): VerificationResult {
-        val apiKey = secureStorage.getApiKey() ?: return VerificationResult(false, "No API key")
+        val haikuModel = "claude-haiku-4-5-20251001"
+        val apiKey = secureStorage.getApiKeyForModel(haikuModel) ?: return VerificationResult(false, "No Claude API key for verification")
 
-        val haikuClient = ClaudeAPIClient(apiKey, "claude-haiku-4-5-20251001")
+        val haikuClient = ClaudeAPIClient(apiKey, haikuModel)
 
         val prompt = """
             ORIGINAL ELEMENT MAP:

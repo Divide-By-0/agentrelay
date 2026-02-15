@@ -117,12 +117,39 @@ class ElementMapGenerator(
     }
 
     private fun reindexElements(elements: List<UIElement>): List<UIElement> {
-        val counters = mutableMapOf<ElementType, Int>()
+        val usedIds = mutableMapOf<String, Int>()
         return elements.map { el ->
-            val count = counters.getOrDefault(el.type, 0) + 1
-            counters[el.type] = count
-            el.copy(id = "${typePrefix(el.type)}_$count")
+            val baseId = buildSemanticId(el)
+            val count = usedIds.getOrDefault(baseId, 0) + 1
+            usedIds[baseId] = count
+            // First occurrence: btn_search, duplicates: btn_search_2, btn_search_3
+            val finalId = if (count == 1) baseId else "${baseId}_$count"
+            el.copy(id = finalId)
         }
+    }
+
+    private fun buildSemanticId(element: UIElement): String {
+        val prefix = typePrefix(element.type)
+        val slug = textToSlug(element.text)
+        return if (slug.isNotEmpty()) "${prefix}_$slug" else prefix
+    }
+
+    /**
+     * Converts element text into a short snake_case slug for use in IDs.
+     * "Search results"   → "search_results"
+     * "OK"               → "ok"
+     * "Enter your name..." → "enter_your_name"
+     * "12:45 PM"         → "12_45_pm"
+     */
+    private fun textToSlug(text: String): String {
+        if (text.isBlank()) return ""
+        return text
+            .lowercase()
+            .replace(Regex("[^a-z0-9]+"), "_") // non-alphanumeric → underscore
+            .replace(Regex("_+"), "_")          // collapse runs
+            .trim('_')
+            .take(MAX_SLUG_LENGTH)              // cap length
+            .trimEnd('_')                       // clean trailing _ after truncation
     }
 
     private fun typePrefix(type: ElementType): String = when (type) {
@@ -141,5 +168,6 @@ class ElementMapGenerator(
 
     companion object {
         private const val TAG = "ElementMapGenerator"
+        private const val MAX_SLUG_LENGTH = 24
     }
 }

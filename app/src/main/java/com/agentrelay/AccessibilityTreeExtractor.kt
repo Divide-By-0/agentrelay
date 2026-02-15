@@ -10,8 +10,6 @@ import kotlinx.coroutines.delay
 
 class AccessibilityTreeExtractor(private val service: AutomationService) {
 
-    private val typeCounters = mutableMapOf<ElementType, Int>()
-
     suspend fun extract(): List<UIElement> {
         var root: AccessibilityNodeInfo? = null
         for (attempt in 1..3) {
@@ -26,7 +24,6 @@ class AccessibilityTreeExtractor(private val service: AutomationService) {
             return emptyList()
         }
 
-        typeCounters.clear()
         val elements = mutableListOf<UIElement>()
         traverseNode(root, elements)
         root.recycle()
@@ -53,13 +50,9 @@ class AccessibilityTreeExtractor(private val service: AutomationService) {
 
         // Only include nodes that have text or are interactive
         if (text.isNotBlank() || isInteractive) {
-            val count = typeCounters.getOrDefault(type, 0) + 1
-            typeCounters[type] = count
-            val id = "${typePrefix(type)}_$count"
-
             elements.add(
                 UIElement(
-                    id = id,
+                    id = "", // assigned later by ElementMapGenerator
                     type = type,
                     text = text.take(100), // Truncate very long text
                     bounds = bounds,

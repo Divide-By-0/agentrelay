@@ -46,7 +46,9 @@ class SecureStorage(context: Context) {
         }
     }
 
+    // Per-provider API key storage
     fun saveApiKey(apiKey: String) {
+        // Legacy: also saves to old key for backward compat
         sharedPreferences.edit().putString(KEY_API_KEY, apiKey).apply()
     }
 
@@ -54,24 +56,83 @@ class SecureStorage(context: Context) {
         return sharedPreferences.getString(KEY_API_KEY, null)
     }
 
+    fun saveClaudeApiKey(key: String) {
+        sharedPreferences.edit().putString(KEY_CLAUDE_API_KEY, key).apply()
+    }
+
+    fun getClaudeApiKey(): String? {
+        // Fall back to legacy key for migration
+        return sharedPreferences.getString(KEY_CLAUDE_API_KEY, null)
+            ?: sharedPreferences.getString(KEY_API_KEY, null)
+    }
+
+    fun saveOpenAIApiKey(key: String) {
+        sharedPreferences.edit().putString(KEY_OPENAI_API_KEY, key).apply()
+    }
+
+    fun getOpenAIApiKey(): String? {
+        return sharedPreferences.getString(KEY_OPENAI_API_KEY, null)
+    }
+
+    fun saveGeminiApiKey(key: String) {
+        sharedPreferences.edit().putString(KEY_GEMINI_API_KEY, key).apply()
+    }
+
+    fun getGeminiApiKey(): String? {
+        return sharedPreferences.getString(KEY_GEMINI_API_KEY, null)
+    }
+
+    fun getApiKeyForModel(model: String): String? {
+        return when (providerForModel(model)) {
+            Provider.CLAUDE -> getClaudeApiKey()
+            Provider.OPENAI -> getOpenAIApiKey()
+            Provider.GEMINI -> getGeminiApiKey()
+        }
+    }
+
+    fun hasApiKeyForModel(model: String): Boolean {
+        return !getApiKeyForModel(model).isNullOrEmpty()
+    }
+
     fun hasApiKey(): Boolean {
-        return !getApiKey().isNullOrEmpty()
+        return !getClaudeApiKey().isNullOrEmpty()
+            || !getOpenAIApiKey().isNullOrEmpty()
+            || !getGeminiApiKey().isNullOrEmpty()
     }
 
     fun clearApiKey() {
-        sharedPreferences.edit().remove(KEY_API_KEY).apply()
+        sharedPreferences.edit()
+            .remove(KEY_API_KEY)
+            .remove(KEY_CLAUDE_API_KEY)
+            .remove(KEY_OPENAI_API_KEY)
+            .remove(KEY_GEMINI_API_KEY)
+            .apply()
     }
 
     fun isValidApiKey(apiKey: String): Boolean {
-        return apiKey.startsWith("sk-ant-api") && apiKey.length > 20
+        return isValidClaudeKey(apiKey) || isValidOpenAIKey(apiKey) || isValidGeminiKey(apiKey)
     }
+
+    fun isValidClaudeKey(key: String): Boolean {
+        return key.startsWith("sk-ant-") && key.length > 20
+    }
+
+    fun isValidOpenAIKey(key: String): Boolean {
+        return key.startsWith("sk-") && !key.startsWith("sk-ant-") && key.length > 20
+    }
+
+    fun isValidGeminiKey(key: String): Boolean {
+        return key.startsWith("AIza") && key.length > 20
+    }
+
+    enum class Provider { CLAUDE, OPENAI, GEMINI }
 
     fun saveModel(model: String) {
         sharedPreferences.edit().putString(KEY_MODEL, model).apply()
     }
 
     fun getModel(): String {
-        return sharedPreferences.getString(KEY_MODEL, "gemini-2.0-flash-exp") ?: "gemini-2.0-flash-exp"
+        return sharedPreferences.getString(KEY_MODEL, "claude-haiku-4-5-20251001") ?: "claude-haiku-4-5-20251001"
     }
 
     fun saveScreenshotQuality(quality: Int) {
@@ -116,6 +177,14 @@ class SecureStorage(context: Context) {
         return sharedPreferences.getBoolean(KEY_OCR_ENABLED, false) // Default off until keys configured
     }
 
+    fun setFloatingBubbleEnabled(enabled: Boolean) {
+        sharedPreferences.edit().putBoolean(KEY_FLOATING_BUBBLE, enabled).apply()
+    }
+
+    fun getFloatingBubbleEnabled(): Boolean {
+        return sharedPreferences.getBoolean(KEY_FLOATING_BUBBLE, true)
+    }
+
     fun setVerificationEnabled(enabled: Boolean) {
         sharedPreferences.edit().putBoolean(KEY_VERIFICATION_ENABLED, enabled).apply()
     }
@@ -124,8 +193,27 @@ class SecureStorage(context: Context) {
         return sharedPreferences.getBoolean(KEY_VERIFICATION_ENABLED, true)
     }
 
+    fun setPlanningEnabled(enabled: Boolean) {
+        sharedPreferences.edit().putBoolean(KEY_PLANNING_ENABLED, enabled).apply()
+    }
+
+    fun getPlanningEnabled(): Boolean {
+        return sharedPreferences.getBoolean(KEY_PLANNING_ENABLED, true)
+    }
+
+    fun savePlanningModel(model: String) {
+        sharedPreferences.edit().putString(KEY_PLANNING_MODEL, model).apply()
+    }
+
+    fun getPlanningModel(): String {
+        return sharedPreferences.getString(KEY_PLANNING_MODEL, "claude-opus-4-6") ?: "claude-opus-4-6"
+    }
+
     companion object {
-        private const val KEY_API_KEY = "claude_api_key"
+        private const val KEY_API_KEY = "claude_api_key" // legacy
+        private const val KEY_CLAUDE_API_KEY = "claude_api_key_v2"
+        private const val KEY_OPENAI_API_KEY = "openai_api_key"
+        private const val KEY_GEMINI_API_KEY = "gemini_api_key"
         private const val KEY_MODEL = "claude_model"
         private const val KEY_SCREENSHOT_QUALITY = "screenshot_quality"
         private const val KEY_LAST_UPLOAD_SPEED = "last_upload_speed"
@@ -133,6 +221,18 @@ class SecureStorage(context: Context) {
         private const val KEY_REPLICATE_API_TOKEN = "replicate_api_token"
         private const val KEY_OCR_ENABLED = "ocr_enabled"
         private const val KEY_VERIFICATION_ENABLED = "verification_enabled"
+        private const val KEY_FLOATING_BUBBLE = "floating_bubble_enabled"
+        private const val KEY_PLANNING_ENABLED = "planning_enabled"
+        private const val KEY_PLANNING_MODEL = "planning_model"
+
+        fun providerForModel(model: String): Provider {
+            return when {
+                model.startsWith("claude") -> Provider.CLAUDE
+                model.startsWith("gpt") || model.startsWith("o1") || model.startsWith("o3") || model.startsWith("o4") -> Provider.OPENAI
+                model.startsWith("gemini") -> Provider.GEMINI
+                else -> Provider.CLAUDE
+            }
+        }
 
         @Volatile
         private var INSTANCE: SecureStorage? = null

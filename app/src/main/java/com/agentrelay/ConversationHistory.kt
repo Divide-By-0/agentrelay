@@ -20,14 +20,22 @@ data class ConversationItem(
     val response: String? = null,
     val action: String? = null,
     val actionDescription: String? = null,
-    val status: String
+    val status: String,
+    // Semantic pipeline debug data
+    val elementMapText: String? = null,
+    val chosenElementId: String? = null,
+    val chosenElementText: String? = null,
+    val clickX: Int? = null,
+    val clickY: Int? = null,
+    val annotatedScreenshot: String? = null
 ) {
     enum class ItemType {
         SCREENSHOT_CAPTURED,
         API_REQUEST,
         API_RESPONSE,
         ACTION_EXECUTED,
-        ERROR
+        ERROR,
+        PLANNING
     }
 }
 

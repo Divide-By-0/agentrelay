@@ -31,6 +31,9 @@ class StatusOverlay(private val context: Context) {
 
     // Persistent state that survives hide/show cycles
     private var savedIsCollapsed = false
+    private var savedX = 20
+    private var savedY = 200
+    private var hasSavedPosition = false
 
     fun show() {
         if (isShowing) return
@@ -241,8 +244,8 @@ class StatusOverlay(private val context: Context) {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.END or Gravity.TOP
-            x = 20
-            y = 200
+            x = savedX
+            y = savedY
         }
 
         // Make draggable by header
@@ -265,6 +268,10 @@ class StatusOverlay(private val context: Context) {
                     // So we need to subtract the delta to make dragging feel natural
                     params.x = initialX - (event.rawX - initialTouchX).toInt()
                     params.y = initialY + (event.rawY - initialTouchY).toInt()
+                    // Persist position so it survives hide/show cycles
+                    savedX = params.x
+                    savedY = params.y
+                    hasSavedPosition = true
                     windowManager.updateViewLayout(container, params)
                     true
                 }

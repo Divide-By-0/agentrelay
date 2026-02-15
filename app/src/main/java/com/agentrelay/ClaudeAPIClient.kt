@@ -123,14 +123,14 @@ class ClaudeAPIClient(
             Respond with a JSON object containing:
             - "steps": array of action objects, each with:
               - "action": one of "click", "type", "swipe", "back", "home", "wait", "complete"
-              - "element": element ID from the map (e.g. "btn_1") — required for click/type
+              - "element": element ID from the map (e.g. "btn_search", "input_query") — required for click/type. IDs are semantic: type prefix + text slug.
               - "text": text to type (for type action only)
               - "direction": "up", "down", "left", "right" (for swipe only)
               - "description": brief description (3-7 words)
             - "reasoning": brief explanation of your plan
 
             Example response:
-            {"steps": [{"action": "click", "element": "input_1", "description": "Tap search field"}, {"action": "type", "element": "input_1", "text": "weather", "description": "Type search query"}], "reasoning": "Need to search for weather"}
+            {"steps": [{"action": "click", "element": "input_search_query", "description": "Tap search field"}, {"action": "type", "element": "input_search_query", "text": "weather", "description": "Type search query"}], "reasoning": "Need to search for weather"}
 
             Rules:
             1. Respond with ONLY valid JSON (no markdown, no explanation outside JSON)
@@ -169,7 +169,8 @@ class ClaudeAPIClient(
         }
     }
 
-    private fun parseSemanticActionPlan(jsonText: String): SemanticActionPlan {
+    @androidx.annotation.VisibleForTesting
+    internal fun parseSemanticActionPlan(jsonText: String): SemanticActionPlan {
         return try {
             var cleanJson = jsonText.trim()
 
@@ -295,7 +296,8 @@ class ClaudeAPIClient(
         }
     }
 
-    private fun parseActionWithDescription(jsonText: String): ActionWithDescription {
+    @androidx.annotation.VisibleForTesting
+    internal fun parseActionWithDescription(jsonText: String): ActionWithDescription {
         return try {
             // Extract JSON from markdown code blocks or find first JSON object
             var cleanJson = jsonText.trim()

@@ -158,7 +158,6 @@ fun MainScreen(onRequestScreenCapture: () -> Unit) {
     val context = LocalContext.current
     val secureStorage = remember { SecureStorage.getInstance(context) }
 
-    var apiKey by remember { mutableStateOf(secureStorage.getApiKey() ?: "") }
     var serviceRunning by remember { mutableStateOf(ScreenCaptureService.instance != null) }
     var isServiceOperationLoading by remember { mutableStateOf(false) }
     var overlayPermission by remember {
@@ -213,7 +212,7 @@ fun MainScreen(onRequestScreenCapture: () -> Unit) {
                 fontSize = 34.sp,
                 fontWeight = FontWeight.Bold,
                 color = IOSLabel,
-                modifier = Modifier.padding(start = 20.dp, top = 8.dp, bottom = 12.dp)
+                modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 16.dp)
             )
 
             when (selectedTab) {
@@ -263,16 +262,6 @@ fun MainScreen(onRequestScreenCapture: () -> Unit) {
                     }
                 )
                 1 -> SettingsTab(
-                    apiKey = apiKey,
-                    onApiKeyChange = { apiKey = it },
-                    onSaveApiKey = {
-                        if (secureStorage.isValidApiKey(apiKey)) {
-                            secureStorage.saveApiKey(apiKey)
-                            Toast.makeText(context, "API key saved", Toast.LENGTH_SHORT).show()
-                        } else {
-                            Toast.makeText(context, "Invalid API key format", Toast.LENGTH_SHORT).show()
-                        }
-                    },
                     overlayPermission = overlayPermission,
                     accessibilityPermission = accessibilityPermission,
                     onRequestOverlayPermission = {
@@ -382,42 +371,44 @@ fun AgentTab(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(16.dp),
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
                     modifier = Modifier
-                        .size(44.dp)
+                        .size(40.dp)
                         .clip(RoundedCornerShape(10.dp))
-                        .background(if (serviceRunning) IOSGreen.copy(alpha = 0.15f) else IOSGray6),
+                        .background(if (serviceRunning) IOSGreen.copy(alpha = 0.12f) else IOSGray6),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         if (serviceRunning) Icons.Default.PlayCircle else Icons.Default.PauseCircle,
                         contentDescription = null,
                         tint = if (serviceRunning) IOSGreen else IOSGray,
-                        modifier = Modifier.size(24.dp)
+                        modifier = Modifier.size(22.dp)
                     )
                 }
-                Spacer(modifier = Modifier.width(14.dp))
+                Spacer(modifier = Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         if (serviceRunning) "Running" else "Stopped",
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 17.sp,
-                        color = IOSLabel
+                        color = IOSLabel,
+                        lineHeight = 22.sp
                     )
                     Text(
                         if (serviceRunning) "Tap 'Start Agent' in notification"
                         else if (!accessibilityPermission || !overlayPermission) "Grant permissions in Settings"
                         else "Ready to start",
-                        fontSize = 13.sp,
-                        color = IOSSecondaryLabel
+                        fontSize = 14.sp,
+                        color = IOSSecondaryLabel,
+                        lineHeight = 18.sp
                     )
                 }
             }
 
-            Divider(color = IOSSeparator, modifier = Modifier.padding(start = 74.dp))
+            Divider(color = IOSSeparator, modifier = Modifier.padding(start = 68.dp))
 
             // Start/Stop button
             Box(
@@ -426,7 +417,7 @@ fun AgentTab(
                     .clickable(enabled = !isServiceOperationLoading) {
                         if (serviceRunning) onStopService() else onStartService()
                     }
-                    .padding(16.dp),
+                    .padding(vertical = 12.dp),
                 contentAlignment = Alignment.Center
             ) {
                 if (isServiceOperationLoading) {
@@ -439,27 +430,28 @@ fun AgentTab(
                     Text(
                         if (serviceRunning) "Stop Service" else "Start Service",
                         color = if (serviceRunning) IOSRed else IOSBlue,
-                        fontWeight = FontWeight.Medium,
+                        fontWeight = FontWeight.Normal,
                         fontSize = 17.sp
                     )
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(20.dp))
+        Spacer(modifier = Modifier.height(28.dp))
 
         // Activity feed
         if (conversationItems.isEmpty()) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 60.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                    .weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
             ) {
                 Icon(
                     Icons.Default.Forum,
                     contentDescription = null,
-                    modifier = Modifier.size(52.dp),
+                    modifier = Modifier.size(48.dp),
                     tint = IOSTertiaryLabel
                 )
                 Spacer(modifier = Modifier.height(12.dp))
@@ -477,7 +469,8 @@ fun AgentTab(
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Normal,
                 color = IOSSecondaryLabel,
-                modifier = Modifier.padding(start = 32.dp, bottom = 6.dp)
+                letterSpacing = 0.5.sp,
+                modifier = Modifier.padding(start = 32.dp, bottom = 8.dp)
             )
             LazyColumn(
                 modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
@@ -494,10 +487,13 @@ fun AgentTab(
 @Composable
 fun ActivityRow(item: ConversationItem) {
     var expanded by remember { mutableStateOf(false) }
+    var debugExpanded by remember { mutableStateOf(false) }
+    val hasDebugData = item.elementMapText != null || item.annotatedScreenshot != null
     val iconColor = when (item.type) {
         ConversationItem.ItemType.ERROR -> IOSRed
         ConversationItem.ItemType.ACTION_EXECUTED -> IOSGreen
         ConversationItem.ItemType.SCREENSHOT_CAPTURED -> IOSOrange
+        ConversationItem.ItemType.PLANNING -> Color(0xFF5856D6) // iOS purple
         else -> IOSBlue
     }
     val icon = when (item.type) {
@@ -506,6 +502,7 @@ fun ActivityRow(item: ConversationItem) {
         ConversationItem.ItemType.API_RESPONSE -> Icons.Default.SmartToy
         ConversationItem.ItemType.ACTION_EXECUTED -> Icons.Default.CheckCircle
         ConversationItem.ItemType.ERROR -> Icons.Default.ErrorOutline
+        ConversationItem.ItemType.PLANNING -> Icons.Default.Psychology
     }
 
     Surface(
@@ -513,6 +510,7 @@ fun ActivityRow(item: ConversationItem) {
         shape = RoundedCornerShape(0.dp)
     ) {
         Column {
+            // Main row
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -549,6 +547,7 @@ fun ActivityRow(item: ConversationItem) {
                 )
             }
 
+            // Expanded basic info
             if (expanded) {
                 Column(modifier = Modifier.padding(start = 58.dp, end = 16.dp, bottom = 12.dp)) {
                     item.actionDescription?.let {
@@ -563,6 +562,76 @@ fun ActivityRow(item: ConversationItem) {
                         Text("Prompt: $it", fontSize = 13.sp, color = IOSSecondaryLabel)
                         Spacer(modifier = Modifier.height(4.dp))
                     }
+
+                    // Chosen element + coordinates (for ACTION_EXECUTED)
+                    if (item.chosenElementId != null) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .background(IOSBlue.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    item.chosenElementId,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = IOSBlue,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                )
+                            }
+                            if (item.chosenElementText?.isNotBlank() == true) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    "\"${item.chosenElementText}\"",
+                                    fontSize = 13.sp,
+                                    color = IOSSecondaryLabel,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                        if (item.clickX != null && item.clickY != null) {
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                "Tap at (${item.clickX}, ${item.clickY})",
+                                fontSize = 12.sp,
+                                color = IOSTertiaryLabel,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            )
+                        }
+                    }
+
+                    // Annotated screenshot (for ACTION_EXECUTED)
+                    item.annotatedScreenshot?.let { annotated ->
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "Tap Location",
+                            fontSize = 12.sp,
+                            color = IOSTertiaryLabel,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        val annotatedBitmap = remember(annotated) {
+                            try {
+                                val bytes = Base64.decode(annotated, Base64.DEFAULT)
+                                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                            } catch (e: Exception) { null }
+                        }
+                        if (annotatedBitmap != null) {
+                            Image(
+                                bitmap = annotatedBitmap,
+                                contentDescription = "Annotated screenshot showing tap location",
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(220.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .border(1.dp, IOSGray4, RoundedCornerShape(8.dp)),
+                                contentScale = ContentScale.Fit
+                            )
+                        }
+                    }
+
+                    // Plain screenshot (for SCREENSHOT_CAPTURED)
                     item.screenshot?.let { screenshot ->
                         Text(
                             "Screenshot (${item.screenshotWidth}x${item.screenshotHeight})",
@@ -590,6 +659,97 @@ fun ActivityRow(item: ConversationItem) {
                 }
             }
 
+            // Debug row — Element Tree (separate expandable)
+            if (expanded && hasDebugData) {
+                Divider(color = IOSSeparator, modifier = Modifier.padding(start = 58.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { debugExpanded = !debugExpanded }
+                        .padding(start = 58.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.AccountTree,
+                        contentDescription = null,
+                        tint = IOSGray,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        "Element Tree",
+                        fontSize = 13.sp,
+                        color = IOSSecondaryLabel,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        "${item.elementMapText?.lines()?.size ?: 0} elements",
+                        fontSize = 12.sp,
+                        color = IOSTertiaryLabel
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Icon(
+                        if (debugExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = null,
+                        tint = IOSGray2,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+
+                if (debugExpanded && item.elementMapText != null) {
+                    Column(
+                        modifier = Modifier
+                            .padding(start = 58.dp, end = 16.dp, bottom = 12.dp)
+                    ) {
+                        Surface(
+                            color = Color(0xFFF8F8FA),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            val scrollState = rememberScrollState()
+                            Column(
+                                modifier = Modifier
+                                    .padding(10.dp)
+                                    .heightIn(max = 300.dp)
+                                    .verticalScroll(scrollState)
+                            ) {
+                                item.elementMapText.lines().forEach { line ->
+                                    val isChosenLine = item.chosenElementId != null &&
+                                            line.contains("[${item.chosenElementId}]")
+                                    Row(modifier = Modifier.fillMaxWidth()) {
+                                        if (isChosenLine) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .background(IOSBlue.copy(alpha = 0.12f), RoundedCornerShape(3.dp))
+                                                    .padding(horizontal = 4.dp, vertical = 1.dp)
+                                            ) {
+                                                Text(
+                                                    line,
+                                                    fontSize = 10.sp,
+                                                    color = IOSBlue,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                                    maxLines = 2
+                                                )
+                                            }
+                                        } else {
+                                            Text(
+                                                line,
+                                                fontSize = 10.sp,
+                                                color = IOSSecondaryLabel,
+                                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                                maxLines = 2
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             Divider(color = IOSSeparator, modifier = Modifier.padding(start = 58.dp))
         }
     }
@@ -600,9 +760,6 @@ fun ActivityRow(item: ConversationItem) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsTab(
-    apiKey: String,
-    onApiKeyChange: (String) -> Unit,
-    onSaveApiKey: () -> Unit,
     overlayPermission: Boolean,
     accessibilityPermission: Boolean,
     onRequestOverlayPermission: () -> Unit,
@@ -663,53 +820,102 @@ fun SettingsTab(
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // ── API Key Section ──
-        IOSSectionHeader("API KEY")
+        // ── API Keys Section ──
+        IOSSectionHeader("API KEYS")
         IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            var claudeKey by remember { mutableStateOf(secureStorage.getClaudeApiKey() ?: "") }
+            var openaiKey by remember { mutableStateOf(secureStorage.getOpenAIApiKey() ?: "") }
+            var geminiKey by remember { mutableStateOf(secureStorage.getGeminiApiKey() ?: "") }
+
             Column(modifier = Modifier.padding(16.dp)) {
-                OutlinedTextField(
-                    value = apiKey,
-                    onValueChange = onApiKeyChange,
-                    modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("sk-ant-api03-...", color = IOSTertiaryLabel) },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    shape = RoundedCornerShape(10.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = IOSBlue,
-                        unfocusedBorderColor = IOSGray4,
-                        cursorColor = IOSBlue,
-                        focusedContainerColor = Color.White,
-                        unfocusedContainerColor = Color.White
-                    )
+                // Claude
+                Text("Anthropic (Claude)", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = IOSSecondaryLabel)
+                Spacer(modifier = Modifier.height(6.dp))
+                ApiKeyField(
+                    value = claudeKey,
+                    onValueChange = { claudeKey = it },
+                    placeholder = "sk-ant-api03-...",
+                    isValid = claudeKey.isEmpty() || secureStorage.isValidClaudeKey(claudeKey),
+                    onSave = {
+                        if (claudeKey.isEmpty() || secureStorage.isValidClaudeKey(claudeKey)) {
+                            secureStorage.saveClaudeApiKey(claudeKey)
+                            secureStorage.saveApiKey(claudeKey) // legacy compat
+                            Toast.makeText(context, "Claude key saved", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "Invalid Claude key format", Toast.LENGTH_SHORT).show()
+                        }
+                    }
                 )
-                Spacer(modifier = Modifier.height(12.dp))
-                Button(
-                    onClick = onSaveApiKey,
-                    modifier = Modifier.fillMaxWidth().height(44.dp),
-                    shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = IOSBlue)
-                ) {
-                    Text("Save", fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
-                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // OpenAI
+                Text("OpenAI", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = IOSSecondaryLabel)
+                Spacer(modifier = Modifier.height(6.dp))
+                ApiKeyField(
+                    value = openaiKey,
+                    onValueChange = { openaiKey = it },
+                    placeholder = "sk-proj-...",
+                    isValid = openaiKey.isEmpty() || secureStorage.isValidOpenAIKey(openaiKey),
+                    onSave = {
+                        if (openaiKey.isEmpty() || secureStorage.isValidOpenAIKey(openaiKey)) {
+                            secureStorage.saveOpenAIApiKey(openaiKey)
+                            Toast.makeText(context, "OpenAI key saved", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "Invalid OpenAI key format", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Gemini
+                Text("Google (Gemini)", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = IOSSecondaryLabel)
+                Spacer(modifier = Modifier.height(6.dp))
+                ApiKeyField(
+                    value = geminiKey,
+                    onValueChange = { geminiKey = it },
+                    placeholder = "AIza...",
+                    isValid = geminiKey.isEmpty() || secureStorage.isValidGeminiKey(geminiKey),
+                    onSave = {
+                        if (geminiKey.isEmpty() || secureStorage.isValidGeminiKey(geminiKey)) {
+                            secureStorage.saveGeminiApiKey(geminiKey)
+                            Toast.makeText(context, "Gemini key saved", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "Invalid Gemini key format", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                )
             }
         }
+        Text(
+            "Set API keys for the providers you want to use. The app picks the right key based on the selected model.",
+            fontSize = 13.sp,
+            color = IOSSecondaryLabel,
+            modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 6.dp),
+            lineHeight = 18.sp
+        )
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // ── Model Section ──
-        IOSSectionHeader("MODEL")
+        // ── Fast Model Section ──
+        IOSSectionHeader("FAST MODEL")
         IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
             var selectedModel by remember { mutableStateOf(secureStorage.getModel()) }
-            val modelOptions = listOf(
+            val fastModelOptions = listOf(
+                "claude-haiku-4-5-20251001" to "Claude Haiku 4.5",
+                "claude-sonnet-4-5" to "Claude Sonnet 4.5",
+                "claude-opus-4-5" to "Claude Opus 4.5",
+                "claude-opus-4-6" to "Claude Opus 4.6",
+                "gpt-4o" to "GPT-4o",
+                "gpt-4o-mini" to "GPT-4o Mini",
+                "o4-mini" to "o4-mini",
                 "gemini-2.0-flash-exp" to "Gemini 2.0 Flash",
                 "gemini-2.0-flash-thinking-exp" to "Gemini 2.0 Flash Thinking",
-                "gemini-exp-1206" to "Gemini Exp 1206",
-                "claude-opus-4-5" to "Claude Opus 4.5",
-                "claude-sonnet-4-5" to "Claude Sonnet 4.5"
+                "gemini-exp-1206" to "Gemini Exp 1206"
             )
 
-            modelOptions.forEachIndexed { index, (modelId, modelName) ->
+            fastModelOptions.forEachIndexed { index, (modelId, modelName) ->
                 IOSSettingsRow(
                     title = modelName,
                     trailing = {
@@ -722,11 +928,59 @@ fun SettingsTab(
                         secureStorage.saveModel(modelId)
                     }
                 )
-                if (index < modelOptions.lastIndex) {
+                if (index < fastModelOptions.lastIndex) {
                     Divider(color = IOSSeparator, modifier = Modifier.padding(start = 16.dp))
                 }
             }
         }
+        Text(
+            "Used for each step of task execution. Faster models reduce latency per action.",
+            fontSize = 13.sp,
+            color = IOSSecondaryLabel,
+            modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 6.dp),
+            lineHeight = 18.sp
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // ── Thinking Model Section ──
+        IOSSectionHeader("THINKING MODEL")
+        IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            var selectedThinkingModel by remember { mutableStateOf(secureStorage.getPlanningModel()) }
+            val thinkingModelOptions = listOf(
+                "claude-opus-4-6" to "Claude Opus 4.6",
+                "claude-sonnet-4-5" to "Claude Sonnet 4.5",
+                "claude-opus-4-5" to "Claude Opus 4.5",
+                "gpt-4o" to "GPT-4o",
+                "o4-mini" to "o4-mini",
+                "gemini-2.0-flash-thinking-exp" to "Gemini 2.0 Flash Thinking"
+            )
+
+            thinkingModelOptions.forEachIndexed { index, (modelId, modelName) ->
+                IOSSettingsRow(
+                    title = modelName,
+                    trailing = {
+                        if (selectedThinkingModel == modelId) {
+                            Icon(Icons.Default.Check, contentDescription = null, tint = IOSBlue, modifier = Modifier.size(20.dp))
+                        }
+                    },
+                    onClick = {
+                        selectedThinkingModel = modelId
+                        secureStorage.savePlanningModel(modelId)
+                    }
+                )
+                if (index < thinkingModelOptions.lastIndex) {
+                    Divider(color = IOSSeparator, modifier = Modifier.padding(start = 16.dp))
+                }
+            }
+        }
+        Text(
+            "Used for strategic planning at task start and recovery from repeated failures.",
+            fontSize = 13.sp,
+            color = IOSSecondaryLabel,
+            modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 6.dp),
+            lineHeight = 18.sp
+        )
 
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -760,6 +1014,47 @@ fun SettingsTab(
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        // ── Interface Section ──
+        IOSSectionHeader("INTERFACE")
+        IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            var bubbleEnabled by remember { mutableStateOf(secureStorage.getFloatingBubbleEnabled()) }
+
+            IOSSettingsRow(
+                icon = Icons.Default.Circle,
+                iconBackground = Color(0xFFCC9B6D),
+                title = "Floating Bubble",
+                subtitle = if (bubbleEnabled) "Tap to start agent" else "Disabled",
+                trailing = {
+                    Switch(
+                        checked = bubbleEnabled,
+                        onCheckedChange = {
+                            bubbleEnabled = it
+                            secureStorage.setFloatingBubbleEnabled(it)
+                            // Show/hide immediately if service is running
+                            if (it && ScreenCaptureService.instance != null) {
+                                FloatingBubble.getInstance(context).show()
+                            } else {
+                                FloatingBubble.getInstance(context).hide()
+                            }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = IOSGreen
+                        )
+                    )
+                }
+            )
+        }
+        Text(
+            "Shows a small draggable circle on screen to quickly open the agent.",
+            fontSize = 13.sp,
+            color = IOSSecondaryLabel,
+            modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 6.dp),
+            lineHeight = 18.sp
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
         // ── Semantic Pipeline Section ──
         IOSSectionHeader("SEMANTIC PIPELINE")
         IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
@@ -785,6 +1080,41 @@ fun SettingsTab(
                 }
             )
         }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // ── Planning Agent Section ──
+        IOSSectionHeader("PLANNING AGENT")
+        IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            var planningEnabled by remember { mutableStateOf(secureStorage.getPlanningEnabled()) }
+
+            IOSSettingsRow(
+                icon = Icons.Default.Psychology,
+                iconBackground = Color(0xFF5856D6),
+                title = "Planning Agent",
+                subtitle = if (planningEnabled) "Uses thinking model" else "Disabled",
+                trailing = {
+                    Switch(
+                        checked = planningEnabled,
+                        onCheckedChange = {
+                            planningEnabled = it
+                            secureStorage.setPlanningEnabled(it)
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = IOSGreen
+                        )
+                    )
+                }
+            )
+        }
+        Text(
+            "Uses the thinking model to plan strategies and recover from failures.",
+            fontSize = 13.sp,
+            color = IOSSecondaryLabel,
+            modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 6.dp),
+            lineHeight = 18.sp
+        )
 
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -890,6 +1220,51 @@ fun SettingsTab(
             modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 6.dp),
             lineHeight = 18.sp
         )
+    }
+}
+
+// ─── API Key Field Component ──────────────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ApiKeyField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    isValid: Boolean,
+    onSave: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = Modifier.weight(1f),
+            placeholder = { Text(placeholder, color = IOSTertiaryLabel) },
+            visualTransformation = PasswordVisualTransformation(),
+            singleLine = true,
+            shape = RoundedCornerShape(10.dp),
+            isError = !isValid,
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = IOSBlue,
+                unfocusedBorderColor = IOSGray4,
+                errorBorderColor = IOSRed,
+                cursorColor = IOSBlue,
+                focusedContainerColor = Color.White,
+                unfocusedContainerColor = Color.White
+            )
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Button(
+            onClick = onSave,
+            modifier = Modifier.height(44.dp),
+            shape = RoundedCornerShape(10.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = IOSBlue)
+        ) {
+            Text("Save", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+        }
     }
 }
 

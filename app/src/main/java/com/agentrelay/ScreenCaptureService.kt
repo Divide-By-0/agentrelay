@@ -99,6 +99,10 @@ class ScreenCaptureService : Service() {
                     }
                     Log.d(TAG, "Initializing MediaProjection with permission data")
                     initMediaProjection(resultCode, data)
+                    // Show floating bubble if enabled
+                    if (SecureStorage.getInstance(this).getFloatingBubbleEnabled()) {
+                        FloatingBubble.getInstance(this).show()
+                    }
                 } else {
                     // No valid projection data - start foreground without mediaProjection type
                     startForegroundSafe(notification)
@@ -150,6 +154,7 @@ class ScreenCaptureService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        FloatingBubble.getInstance(this).hide()
         stopCapture()
         instance = null
         serviceScope.cancel()

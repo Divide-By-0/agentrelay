@@ -95,6 +95,10 @@ data class UIElement(
     val isFocusable: Boolean = false,
     val isScrollable: Boolean = false,
     val isChecked: Boolean = false,
+    val isEnabled: Boolean = true,
+    val resourceId: String? = null,
+    val scrollRangeY: Int = -1, // -1 = not scrollable or unknown
+    val scrollPositionY: Int = -1,
     val relativePosition: String = "",
     val source: ElementSource = ElementSource.ACCESSIBILITY_TREE
 )
@@ -115,10 +119,13 @@ data class ElementMap(
             if (el.isFocusable) flags.add("focusable")
             if (el.isScrollable) flags.add("scrollable")
             if (el.isChecked) flags.add("checked")
+            if (!el.isEnabled) flags.add("disabled")
+            if (el.scrollRangeY >= 0) flags.add("scroll:${el.scrollPositionY}/${el.scrollRangeY}")
             val flagStr = if (flags.isNotEmpty()) " ${flags.joinToString(",")}" else ""
             val textStr = if (el.text.isNotBlank()) " \"${el.text}\"" else ""
             val posStr = if (el.relativePosition.isNotBlank()) " ${el.relativePosition}" else ""
-            appendLine("[${el.id}] ${el.type}$textStr$flagStr (${el.bounds.left},${el.bounds.top},${el.bounds.right},${el.bounds.bottom})$posStr")
+            val resIdStr = if (!el.resourceId.isNullOrBlank()) " res=${el.resourceId}" else ""
+            appendLine("[${el.id}] ${el.type}$textStr$flagStr$resIdStr (${el.bounds.left},${el.bounds.top},${el.bounds.right},${el.bounds.bottom})$posStr")
         }
     }
 }

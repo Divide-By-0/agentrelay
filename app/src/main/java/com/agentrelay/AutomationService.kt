@@ -7,6 +7,7 @@ import android.graphics.Path
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -161,6 +162,70 @@ class AutomationService : AccessibilityService() {
         }
     }
 
+    /**
+     * Gathers device context: current app, keyboard visibility, active windows, time, installed apps.
+     */
+    fun getDeviceContext(): DeviceContext {
+        val root = rootInActiveWindow
+        val currentPackage = root?.packageName?.toString() ?: "unknown"
+        val currentApp = try {
+            val pm = packageManager
+            val appInfo = pm.getApplicationInfo(currentPackage, 0)
+            pm.getApplicationLabel(appInfo).toString()
+        } catch (_: Exception) { currentPackage }
+
+        // Keyboard visibility: check if an IME window is present
+        val keyboardVisible = try {
+            windows?.any { w ->
+                w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD
+            } ?: false
+        } catch (_: Exception) { false }
+
+        // Active windows list
+        val windowList = try {
+            windows?.mapNotNull { w ->
+                val title = w.title?.toString()
+                val typeName = when (w.type) {
+                    AccessibilityWindowInfo.TYPE_APPLICATION -> "app"
+                    AccessibilityWindowInfo.TYPE_INPUT_METHOD -> "keyboard"
+                    AccessibilityWindowInfo.TYPE_SYSTEM -> "system"
+                    AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY -> "overlay"
+                    else -> "other"
+                }
+                if (title != null) "$typeName:$title" else null
+            } ?: emptyList()
+        } catch (_: Exception) { emptyList() }
+
+        // Current time
+        val timeFormat = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss z", java.util.Locale.getDefault())
+        val currentTime = timeFormat.format(java.util.Date())
+
+        // Installed apps (launchable only)
+        val installedApps = try {
+            val pm = packageManager
+            val intent = android.content.Intent(android.content.Intent.ACTION_MAIN, null)
+            intent.addCategory(android.content.Intent.CATEGORY_LAUNCHER)
+            val resolveInfos = pm.queryIntentActivities(intent, 0)
+            resolveInfos.map { ri ->
+                AppInfo(
+                    name = ri.loadLabel(pm).toString(),
+                    packageName = ri.activityInfo.packageName
+                )
+            }.distinctBy { it.packageName }.sortedBy { it.name.lowercase() }
+        } catch (_: Exception) { emptyList() }
+
+        root?.recycle()
+
+        return DeviceContext(
+            currentAppPackage = currentPackage,
+            currentAppName = currentApp,
+            keyboardVisible = keyboardVisible,
+            windowList = windowList,
+            currentTime = currentTime,
+            installedApps = installedApps
+        )
+    }
+
     companion object {
         private const val TAG = "AutomationService"
 
@@ -171,3 +236,28 @@ class AutomationService : AccessibilityService() {
         fun isServiceEnabled(): Boolean = instance != null
     }
 }
+
+data class DeviceContext(
+    val currentAppPackage: String,
+    val currentAppName: String,
+    val keyboardVisible: Boolean,
+    val windowList: List<String>,
+    val currentTime: String,
+    val installedApps: List<AppInfo>
+) {
+    fun toPromptText(): String = buildString {
+        appendLine("DEVICE CONTEXT:")
+        appendLine("  Current app: $currentAppName ($currentAppPackage)")
+        appendLine("  Current time: $currentTime")
+        appendLine("  Keyboard visible: $keyboardVisible")
+        if (windowList.isNotEmpty()) {
+            appendLine("  Active windows: ${windowList.joinToString(", ")}")
+        }
+        appendLine("  Installed apps (${installedApps.size}): ${installedApps.joinToString(", ") { it.name }}")
+    }
+}
+
+data class AppInfo(
+    val name: String,
+    val packageName: String
+)

@@ -295,7 +295,8 @@ class TaskSuggestionOverlay(private val context: Context) {
         }
     }
 
-    private fun generateSuggestions(originalTask: String, failureReason: String): List<String> {
+    @androidx.annotation.VisibleForTesting
+    internal fun generateSuggestions(originalTask: String, failureReason: String): List<String> {
         val suggestions = mutableListOf<String>()
 
         // Parse failure reason and generate context-aware suggestions
@@ -321,7 +322,8 @@ class TaskSuggestionOverlay(private val context: Context) {
         return suggestions.take(3)
     }
 
-    private fun simplifyTask(task: String): String {
+    @androidx.annotation.VisibleForTesting
+    internal fun simplifyTask(task: String): String {
         // Remove complex parts and make it simpler
         val words = task.split(" ")
         return if (words.size > 5) {
@@ -331,7 +333,8 @@ class TaskSuggestionOverlay(private val context: Context) {
         }
     }
 
-    private fun breakIntoSteps(task: String): String {
+    @androidx.annotation.VisibleForTesting
+    internal fun breakIntoSteps(task: String): String {
         // Suggest breaking into first step
         return "First step: ${task.split(",").first().trim()}"
     }

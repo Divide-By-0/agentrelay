@@ -1,5 +1,11 @@
 package com.agentrelay
 
+import android.content.Context
+import android.util.Log
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
+import java.io.File
+
 data class ScreenshotInfo(
     val base64Data: String,
     val actualWidth: Int,
@@ -40,21 +46,34 @@ data class ConversationItem(
 }
 
 object ConversationHistoryManager {
+    private const val TAG = "ConversationHistory"
+    private const val FILE_NAME = "conversation_history.json"
+    private const val MAX_ITEMS = 100
+    private const val MAX_PERSISTED = 50
+
     private val history = java.util.concurrent.CopyOnWriteArrayList<ConversationItem>()
     private val listeners = java.util.concurrent.CopyOnWriteArrayList<(List<ConversationItem>) -> Unit>()
+    private var appContext: Context? = null
+    private val gson = Gson()
+
+    fun init(context: Context) {
+        appContext = context.applicationContext
+        loadFromDisk()
+    }
 
     fun add(item: ConversationItem) {
         history.add(item)
-        // Keep only last 100 items
-        while (history.size > 100) {
+        while (history.size > MAX_ITEMS) {
             history.removeAt(0)
         }
         notifyListeners()
+        saveToDisk()
     }
 
     fun clear() {
         history.clear()
         notifyListeners()
+        saveToDisk()
     }
 
     fun getAll(): List<ConversationItem> = history.toList()
@@ -66,6 +85,42 @@ object ConversationHistoryManager {
 
     fun removeListener(listener: (List<ConversationItem>) -> Unit) {
         listeners.remove(listener)
+    }
+
+    fun saveToDisk() {
+        val ctx = appContext ?: return
+        try {
+            // Persist only the last N items, stripping heavy image data to keep file small
+            val toSave = history.takeLast(MAX_PERSISTED).map { item ->
+                item.copy(
+                    screenshot = null,
+                    annotatedScreenshot = null
+                )
+            }
+            val json = gson.toJson(toSave)
+            File(ctx.filesDir, FILE_NAME).writeText(json)
+            Log.d(TAG, "Saved ${toSave.size} items to disk")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save history", e)
+        }
+    }
+
+    private fun loadFromDisk() {
+        val ctx = appContext ?: return
+        try {
+            val file = File(ctx.filesDir, FILE_NAME)
+            if (!file.exists()) return
+            val json = file.readText()
+            if (json.isBlank()) return
+            val type = object : TypeToken<List<ConversationItem>>() {}.type
+            val items: List<ConversationItem> = gson.fromJson(json, type)
+            history.clear()
+            history.addAll(items)
+            Log.d(TAG, "Loaded ${items.size} items from disk")
+            notifyListeners()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load history", e)
+        }
     }
 
     private fun notifyListeners() {

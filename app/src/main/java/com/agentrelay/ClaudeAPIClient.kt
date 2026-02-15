@@ -108,14 +108,17 @@ class ClaudeAPIClient(
         screenshotInfo: ScreenshotInfo,
         elementMap: ElementMap,
         userTask: String,
-        conversationHistory: List<Message>
+        conversationHistory: List<Message>,
+        deviceContext: DeviceContext? = null
     ): Result<SemanticActionPlan> {
         val elementMapText = elementMap.toTextRepresentation()
+        val deviceContextText = deviceContext?.toPromptText() ?: ""
 
         val systemPrompt = """
-            You are an Android automation agent. You receive a screenshot and a structured ELEMENT MAP of the current screen.
+            You are an Android automation agent. You receive a screenshot, a structured ELEMENT MAP, and device context.
             Use the element map to identify UI elements by their IDs and issue actions referencing those IDs.
 
+            ${deviceContextText}
             ${elementMapText}
 
             CRITICAL: Be CONCISE. Descriptions should be 3-7 words max. Get to the goal efficiently.
@@ -136,10 +139,15 @@ class ClaudeAPIClient(
             1. Respond with ONLY valid JSON (no markdown, no explanation outside JSON)
             2. Reference elements by their IDs from the element map
             3. You may return multiple sequential steps
-            4. For click/type, the "element" field is REQUIRED
-            5. Use "complete" with a "description" when the task is done or impossible
-            6. If stuck, try "back" or report completion
+            4. For click/type, the "element" field is REQUIRED — ONLY use IDs that exist in the element map above. Do NOT guess or fabricate IDs.
+            5. ONLY use "complete" when the ENTIRE user task is fully finished — not after a single sub-step. For multi-part tasks (e.g. "open X and do Y"), completing the first part does NOT mean the task is done. Keep going until every part of the request is satisfied.
+            6. If stuck, try "back" or "swipe" before giving up
             7. Keep descriptions brief and action-focused
+            8. When you use "complete", the description MUST explain what was accomplished so it can be verified
+            9. Use the device context to know which app is open, what time it is, whether the keyboard is showing, and what apps are installed
+            10. CORRECTNESS IS CRITICAL: When selecting a contact, recipient, or item from a list, VERIFY the name/text matches EXACTLY. If multiple similar options exist, prefer using search/autofill to narrow results rather than blindly tapping. For contacts, type the person's name in the search/To field and wait for autocomplete suggestions before selecting.
+            11. When the task involves sending a message, email, or performing an action targeting a specific person/item, use the search field or "To" field to type their name. Then select from the autocomplete/suggestion results to ensure accuracy. Do NOT scroll through a long list guessing — always search first.
+            12. If you cannot find the exact target (contact, app, setting, etc.), try these strategies in order: (a) use the search bar if one exists, (b) swipe to find it, (c) go back and try an alternative path. Only report failure after exhausting these options.
 
             User task: $userTask
 

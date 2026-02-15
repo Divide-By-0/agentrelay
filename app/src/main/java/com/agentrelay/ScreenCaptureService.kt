@@ -279,19 +279,7 @@ class ScreenCaptureService : Service() {
         // Auto quality based on last upload speed - fine-grained calculation
         if (quality == -1) {
             val lastSpeed = secureStorage.getLastUploadSpeed() // KB/s
-            quality = when {
-                lastSpeed == 0f -> 60 // First time, use moderate quality
-                lastSpeed > 1000f -> 95 // Very fast (>1 MB/s)
-                lastSpeed > 800f -> 90 // Fast (>800 KB/s)
-                lastSpeed > 600f -> 85 // Good (>600 KB/s)
-                lastSpeed > 400f -> 80 // Above average (>400 KB/s)
-                lastSpeed > 300f -> 75 // Average (>300 KB/s)
-                lastSpeed > 200f -> 65 // Below average (>200 KB/s)
-                lastSpeed > 150f -> 55 // Slow (>150 KB/s)
-                lastSpeed > 100f -> 45 // Very slow (>100 KB/s)
-                lastSpeed > 50f -> 35 // Extremely slow (>50 KB/s)
-                else -> 25 // Minimal quality for very poor connections (<50 KB/s)
-            }
+            quality = computeAutoQuality(lastSpeed)
             Log.d(TAG, "Auto quality: lastSpeed=${lastSpeed}KB/s → quality=$quality")
         }
 
@@ -412,5 +400,20 @@ class ScreenCaptureService : Service() {
         @Volatile
         var instance: ScreenCaptureService? = null
             private set
+
+        @androidx.annotation.VisibleForTesting
+        internal fun computeAutoQuality(lastSpeedKBps: Float): Int = when {
+            lastSpeedKBps == 0f -> 60   // First time, use moderate quality
+            lastSpeedKBps > 1000f -> 95 // Very fast (>1 MB/s)
+            lastSpeedKBps > 800f -> 90  // Fast (>800 KB/s)
+            lastSpeedKBps > 600f -> 85  // Good (>600 KB/s)
+            lastSpeedKBps > 400f -> 80  // Above average (>400 KB/s)
+            lastSpeedKBps > 300f -> 75  // Average (>300 KB/s)
+            lastSpeedKBps > 200f -> 65  // Below average (>200 KB/s)
+            lastSpeedKBps > 150f -> 55  // Slow (>150 KB/s)
+            lastSpeedKBps > 100f -> 45  // Very slow (>100 KB/s)
+            lastSpeedKBps > 50f -> 35   // Extremely slow (>50 KB/s)
+            else -> 25                  // Minimal quality for very poor connections (<50 KB/s)
+        }
     }
 }

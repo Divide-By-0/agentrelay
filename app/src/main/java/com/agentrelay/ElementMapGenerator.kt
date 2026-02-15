@@ -72,7 +72,8 @@ class ElementMapGenerator(
         return merged
     }
 
-    private fun computeIoU(a: Rect, b: Rect): Float {
+    @androidx.annotation.VisibleForTesting
+    internal fun computeIoU(a: Rect, b: Rect): Float {
         val intersectLeft = maxOf(a.left, b.left)
         val intersectTop = maxOf(a.top, b.top)
         val intersectRight = minOf(a.right, b.right)
@@ -141,7 +142,8 @@ class ElementMapGenerator(
      * "Enter your name..." → "enter_your_name"
      * "12:45 PM"         → "12_45_pm"
      */
-    private fun textToSlug(text: String): String {
+    @androidx.annotation.VisibleForTesting
+    internal fun textToSlug(text: String): String {
         if (text.isBlank()) return ""
         return text
             .lowercase()

@@ -72,6 +72,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        ConversationHistoryManager.init(this)
+
         setContent {
             AgentRelayTheme {
                 Surface(
@@ -87,6 +89,11 @@ class MainActivity : ComponentActivity() {
 
         requestPermissions()
         autoRestartServiceIfNeeded()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        ConversationHistoryManager.saveToDisk()
     }
 
     private fun autoRestartServiceIfNeeded() {
@@ -222,6 +229,7 @@ fun MainScreen(onRequestScreenCapture: () -> Unit) {
                     overlayPermission = overlayPermission,
                     isServiceOperationLoading = isServiceOperationLoading,
                     conversationItems = conversationItems,
+                    onClearHistory = { ConversationHistoryManager.clear() },
                     onStartService = {
                         if (!secureStorage.hasApiKey()) {
                             Toast.makeText(context, "Please set API key first", Toast.LENGTH_SHORT).show()
@@ -362,6 +370,7 @@ fun AgentTab(
     overlayPermission: Boolean,
     isServiceOperationLoading: Boolean,
     conversationItems: List<ConversationItem>,
+    onClearHistory: () -> Unit,
     onStartService: () -> Unit,
     onStopService: () -> Unit
 ) {
@@ -464,14 +473,29 @@ fun AgentTab(
                 )
             }
         } else {
-            Text(
-                "RECENT ACTIVITY",
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Normal,
-                color = IOSSecondaryLabel,
-                letterSpacing = 0.5.sp,
-                modifier = Modifier.padding(start = 32.dp, bottom = 8.dp)
-            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 32.dp, end = 20.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "RECENT ACTIVITY",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Normal,
+                    color = IOSSecondaryLabel,
+                    letterSpacing = 0.5.sp,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    "Clear",
+                    fontSize = 13.sp,
+                    color = IOSRed,
+                    modifier = Modifier
+                        .clickable { onClearHistory() }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+            }
             LazyColumn(
                 modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(0.dp)

@@ -15,7 +15,8 @@ private data class StepExecutionResult(
     val clickX: Int? = null,
     val clickY: Int? = null,
     val chosenElementId: String? = null,
-    val chosenElementText: String? = null
+    val chosenElementText: String? = null,
+    val failureReason: String? = null
 )
 
 class AgentOrchestrator(private val context: Context) {
@@ -271,7 +272,15 @@ class AgentOrchestrator(private val context: Context) {
             }
             lastElementMapText = currentMapText
 
-            // 4. Send screenshot + element map to Claude
+            // 4. Gather device context
+            val deviceContext = try {
+                automationService.getDeviceContext()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to get device context", e)
+                null
+            }
+
+            // 5. Send screenshot + element map + device context to Claude
             addStatus("Sending to Claude...")
             val enhancedTask = buildString {
                 // Prepend planning guidance if available
@@ -291,7 +300,8 @@ class AgentOrchestrator(private val context: Context) {
                 screenshotInfo,
                 elementMap,
                 enhancedTask,
-                conversationHistory
+                conversationHistory,
+                deviceContext
             )
 
             if (planResult.isFailure) {
@@ -344,11 +354,47 @@ class AgentOrchestrator(private val context: Context) {
                         msg.startsWith("Failed", ignoreCase = true)) {
                         addStatus("Task failed: $msg")
                         showTaskSuggestionDialog(msg, conversationHistory)
+                        taskCompleted = true
+                        break
+                    }
+
+                    // Verify completion: take a fresh screenshot and ask the model
+                    addStatus("Verifying task completion...")
+                    CursorOverlay.getInstance(context).hide()
+                    StatusOverlay.getInstance(context).hide()
+                    delay(300)
+                    val verifyScreenshot = captureService.captureScreenshot()
+                    CursorOverlay.getInstance(context).show()
+                    StatusOverlay.getInstance(context).show()
+
+                    if (verifyScreenshot != null) {
+                        val verified = verifyTaskCompletion(
+                            claudeClient, task, verifyScreenshot, treeExtractor, conversationHistory
+                        )
+                        if (verified) {
+                            addStatus("Task completed: $msg")
+                            showToast("Task completed: $msg")
+                            taskCompleted = true
+                        } else {
+                            addStatus("Task not actually done — continuing")
+                            failureContext.add("Agent claimed complete but verification failed: $msg")
+                            conversationHistory.add(
+                                Message(
+                                    role = "user",
+                                    content = listOf(ContentBlock.TextContent(
+                                        text = "You said the task is complete ('$msg') but the task is NOT done yet. " +
+                                            "The original task is: $task\n" +
+                                            "Look at the current screen and continue working. Do NOT say complete until EVERY part of the task is finished."
+                                    ))
+                                )
+                            )
+                        }
                     } else {
+                        // Can't verify, trust the agent
                         addStatus("Task completed: $msg")
                         showToast("Task completed: $msg")
+                        taskCompleted = true
                     }
-                    taskCompleted = true
                     break
                 }
 
@@ -378,21 +424,94 @@ class AgentOrchestrator(private val context: Context) {
                 val result = executeSemanticStep(step, elementMap, automationService, cursorOverlay)
 
                 if (!result.success) {
-                    addStatus("Step failed: ${step.description}")
-                    failureContext.add("Step failed: ${step.description}")
-                    failuresSinceLastPlan++
+                    val reason = result.failureReason ?: "Unknown failure"
+                    val detailedStatus = "Step failed: ${step.action} '${step.element ?: ""}' — $reason"
+                    addStatus(detailedStatus)
+                    Log.w(TAG, detailedStatus)
+
                     ConversationHistoryManager.add(
                         ConversationItem(
                             timestamp = System.currentTimeMillis(),
                             type = ConversationItem.ItemType.ERROR,
-                            status = "Step failed: ${step.description}"
+                            action = "${step.action} ${step.element ?: ""}",
+                            actionDescription = step.description,
+                            status = detailedStatus,
+                            elementMapText = currentMapText,
+                            chosenElementId = step.element
                         )
                     )
+
+                    // Retry once: re-extract the element map (UI may have changed)
+                    addStatus("Retrying with fresh element map...")
+                    delay(500)
+                    val retryTree = treeExtractor.extract()
+                    val retryMapGen = ElementMapGenerator(
+                        screenshotInfo.actualWidth, screenshotInfo.actualHeight
+                    )
+                    val retryMap = retryMapGen.generate(retryTree, ocrElements)
+                    val retryMapText = retryMap.toTextRepresentation()
+
+                    val retryResult = executeSemanticStep(step, retryMap, automationService, cursorOverlay)
+                    if (retryResult.success) {
+                        addStatus("Retry succeeded: ${step.description}")
+                        // Build annotated screenshot for the retry
+                        val retryAnnotated = if (retryResult.clickX != null && retryResult.clickY != null) {
+                            createAnnotatedScreenshot(
+                                screenshotInfo, retryResult.clickX, retryResult.clickY,
+                                retryResult.chosenElementId, retryMap
+                            )
+                        } else null
+
+                        ConversationHistoryManager.add(
+                            ConversationItem(
+                                timestamp = System.currentTimeMillis(),
+                                type = ConversationItem.ItemType.ACTION_EXECUTED,
+                                action = "${step.action} ${step.element ?: ""} (retry)",
+                                actionDescription = "${step.description} (retry succeeded)",
+                                status = "Retry succeeded: ${step.description}",
+                                elementMapText = retryMapText,
+                                chosenElementId = retryResult.chosenElementId,
+                                chosenElementText = retryResult.chosenElementText,
+                                clickX = retryResult.clickX,
+                                clickY = retryResult.clickY,
+                                annotatedScreenshot = retryAnnotated
+                            )
+                        )
+                        // Update map text for stuck detection
+                        lastElementMapText = retryMapText
+                        if (stepIdx < plan.steps.lastIndex) delay(500)
+                        continue // Continue to next step
+                    }
+
+                    // Retry also failed — log and feed detailed info to Claude
+                    val retryReason = retryResult.failureReason ?: "Unknown"
+                    val fullFailure = "Step '${step.description}' failed twice.\n" +
+                        "First attempt: $reason\n" +
+                        "Retry: $retryReason"
+                    failureContext.add(fullFailure)
+                    failuresSinceLastPlan++
+
+                    ConversationHistoryManager.add(
+                        ConversationItem(
+                            timestamp = System.currentTimeMillis(),
+                            type = ConversationItem.ItemType.ERROR,
+                            action = "${step.action} ${step.element ?: ""} (retry failed)",
+                            actionDescription = "Retry also failed",
+                            status = "Retry failed: $retryReason",
+                            elementMapText = retryMapText
+                        )
+                    )
+
                     conversationHistory.add(
                         Message(
                             role = "user",
                             content = listOf(ContentBlock.TextContent(
-                                text = "Step failed: ${step.description}. Try something else."
+                                text = "Step FAILED (tried twice): ${step.description}\n" +
+                                    "Reason: $reason\n" +
+                                    "Retry reason: $retryReason\n" +
+                                    "The element '${step.element}' could not be found or interacted with. " +
+                                    "Re-analyze the current screen and try a completely different approach. " +
+                                    "If unsure which element is correct, use search or scroll to find it."
                             ))
                         )
                     )
@@ -513,6 +632,82 @@ class AgentOrchestrator(private val context: Context) {
         }
     }
 
+    private suspend fun verifyTaskCompletion(
+        claudeClient: ClaudeAPIClient,
+        originalTask: String,
+        screenshotInfo: ScreenshotInfo,
+        treeExtractor: AccessibilityTreeExtractor,
+        conversationHistory: List<Message>
+    ): Boolean {
+        return try {
+            val elements = treeExtractor.extract()
+            val mapGen = ElementMapGenerator(screenshotInfo.actualWidth, screenshotInfo.actualHeight)
+            val elementMap = mapGen.generate(elements)
+            val elementMapText = elementMap.toTextRepresentation()
+
+            val systemPrompt = """
+                You are a task completion verifier for an Android automation agent.
+                The agent claims the following task is complete. Look at the current screen and element map
+                and determine if the task has ACTUALLY been fully completed.
+
+                Element map:
+                $elementMapText
+
+                Original task: $originalTask
+
+                Respond with ONLY a JSON object:
+                {"completed": true/false, "reason": "brief explanation"}
+
+                Be STRICT: if the task has multiple parts, ALL parts must be done.
+                If the screen shows the task is only partially done, return false.
+            """.trimIndent()
+
+            val messages = listOf(
+                Message(
+                    role = "user",
+                    content = listOf(
+                        ContentBlock.ImageContent(
+                            source = ImageSource(
+                                data = screenshotInfo.base64Data,
+                                mediaType = screenshotInfo.mediaType
+                            )
+                        ),
+                        ContentBlock.TextContent(text = "Is this task fully completed? Task: $originalTask")
+                    )
+                )
+            )
+
+            val result = claudeClient.sendMessage(messages, systemPrompt)
+            val text = result.getOrNull()?.content?.firstOrNull()?.text ?: return true
+
+            var cleanJson = text.trim()
+            val startIdx = cleanJson.indexOf('{')
+            val endIdx = cleanJson.lastIndexOf('}')
+            if (startIdx >= 0 && endIdx > startIdx) {
+                cleanJson = cleanJson.substring(startIdx, endIdx + 1)
+            }
+
+            val json = com.google.gson.JsonParser.parseString(cleanJson).asJsonObject
+            val completed = json.get("completed")?.asBoolean ?: true
+            val reason = json.get("reason")?.asString ?: ""
+            Log.d(TAG, "Completion verification: completed=$completed, reason=$reason")
+
+            ConversationHistoryManager.add(
+                ConversationItem(
+                    timestamp = System.currentTimeMillis(),
+                    type = ConversationItem.ItemType.PLANNING,
+                    response = "Completion check: ${if (completed) "DONE" else "NOT DONE"} — $reason",
+                    status = if (completed) "Verified: task complete" else "Not done: $reason"
+                )
+            )
+
+            completed
+        } catch (e: Exception) {
+            Log.e(TAG, "Completion verification failed", e)
+            true // If verification fails, trust the agent
+        }
+    }
+
     private suspend fun executeSemanticStep(
         step: SemanticStep,
         elementMap: ElementMap,
@@ -524,8 +719,14 @@ class AgentOrchestrator(private val context: Context) {
                 SemanticAction.CLICK -> {
                     val element = step.element?.let { elementMap.findById(it) }
                     if (element == null) {
-                        Log.e(TAG, "Element not found: ${step.element}")
-                        return StepExecutionResult(false)
+                        val availableIds = elementMap.elements
+                            .filter { it.isClickable }
+                            .take(10)
+                            .joinToString(", ") { "${it.id} (\"${it.text.take(20)}\")" }
+                        val reason = "Element '${step.element}' not found in element map. " +
+                            "Available clickable elements: [$availableIds]"
+                        Log.e(TAG, reason)
+                        return StepExecutionResult(false, failureReason = reason)
                     }
                     val x = element.bounds.centerX()
                     val y = element.bounds.centerY()
@@ -533,11 +734,18 @@ class AgentOrchestrator(private val context: Context) {
                     cursorOverlay.moveTo(x, y, showClick = true)
                     delay(300)
                     val ok = automationService.performTap(x, y)
-                    StepExecutionResult(ok, x, y, step.element, element.text)
+                    if (!ok) {
+                        return StepExecutionResult(false, x, y, step.element, element.text,
+                            failureReason = "Tap gesture failed at ($x, $y) for element '${step.element}' \"${element.text}\"")
+                    }
+                    StepExecutionResult(true, x, y, step.element, element.text)
                 }
 
                 SemanticAction.TYPE -> {
-                    val text = step.text ?: return StepExecutionResult(false)
+                    val text = step.text
+                    if (text == null) {
+                        return StepExecutionResult(false, failureReason = "TYPE action missing 'text' field")
+                    }
                     var tapX: Int? = null
                     var tapY: Int? = null
                     var elText: String? = null
@@ -551,10 +759,21 @@ class AgentOrchestrator(private val context: Context) {
                             delay(300)
                             automationService.performTap(tapX, tapY)
                             delay(300)
+                        } else {
+                            val availableInputs = elementMap.elements
+                                .filter { it.isFocusable || it.type == ElementType.INPUT }
+                                .take(10)
+                                .joinToString(", ") { "${it.id} (\"${it.text.take(20)}\")" }
+                            return StepExecutionResult(false, failureReason =
+                                "Input element '${step.element}' not found. Available inputs: [$availableInputs]")
                         }
                     }
                     val ok = automationService.performType(text)
-                    StepExecutionResult(ok, tapX, tapY, step.element, elText)
+                    if (!ok) {
+                        return StepExecutionResult(false, tapX, tapY, step.element, elText,
+                            failureReason = "Type gesture failed for text \"${text.take(50)}\" — is a text field focused?")
+                    }
+                    StepExecutionResult(true, tapX, tapY, step.element, elText)
                 }
 
                 SemanticAction.SWIPE -> {
@@ -573,11 +792,21 @@ class AgentOrchestrator(private val context: Context) {
                         else -> listOf(centerX, centerY + swipeDistance / 2, centerX, centerY - swipeDistance / 2)
                     }
                     val ok = automationService.performSwipe(startX, startY, endX, endY, 500)
-                    StepExecutionResult(ok, startX, startY)
+                    if (!ok) {
+                        return StepExecutionResult(false, startX, startY, failureReason =
+                            "Swipe $direction failed from ($startX,$startY) to ($endX,$endY)")
+                    }
+                    StepExecutionResult(true, startX, startY)
                 }
 
-                SemanticAction.BACK -> StepExecutionResult(automationService.performBack())
-                SemanticAction.HOME -> StepExecutionResult(automationService.performHome())
+                SemanticAction.BACK -> {
+                    val ok = automationService.performBack()
+                    StepExecutionResult(ok, failureReason = if (!ok) "Back gesture failed" else null)
+                }
+                SemanticAction.HOME -> {
+                    val ok = automationService.performHome()
+                    StepExecutionResult(ok, failureReason = if (!ok) "Home gesture failed" else null)
+                }
 
                 SemanticAction.WAIT -> {
                     delay(1000)
@@ -588,7 +817,7 @@ class AgentOrchestrator(private val context: Context) {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to execute step: ${step.action}", e)
-            StepExecutionResult(false)
+            StepExecutionResult(false, failureReason = "Exception: ${e.javaClass.simpleName} — ${e.message}")
         }
     }
 

@@ -48,6 +48,31 @@ class AccessibilityTreeExtractor(private val service: AutomationService) {
         val text = extractText(node)
         val isInteractive = node.isClickable || node.isFocusable || node.isCheckable
 
+        // Extract resource ID (strip package prefix for brevity)
+        val rawResId = node.viewIdResourceName
+        val resourceId = rawResId?.substringAfter(":id/", rawResId)
+
+        // Extract scroll position/range for scrollable elements
+        var scrollRangeY = -1
+        var scrollPosY = -1
+        if (node.isScrollable) {
+            try {
+                val rangeInfo = node.collectionInfo
+                // Use rangeInfo if available, otherwise try refresh
+                if (rangeInfo != null) {
+                    scrollRangeY = rangeInfo.rowCount
+                }
+            } catch (_: Exception) {}
+            // Try RangeInfo for seekbars/sliders
+            try {
+                val ri = node.rangeInfo
+                if (ri != null) {
+                    scrollRangeY = ri.max.toInt()
+                    scrollPosY = ri.current.toInt()
+                }
+            } catch (_: Exception) {}
+        }
+
         // Only include nodes that have text or are interactive
         if (text.isNotBlank() || isInteractive) {
             elements.add(
@@ -60,6 +85,10 @@ class AccessibilityTreeExtractor(private val service: AutomationService) {
                     isFocusable = node.isFocusable,
                     isScrollable = node.isScrollable,
                     isChecked = node.isChecked,
+                    isEnabled = node.isEnabled,
+                    resourceId = resourceId,
+                    scrollRangeY = scrollRangeY,
+                    scrollPositionY = scrollPosY,
                     source = ElementSource.ACCESSIBILITY_TREE
                 )
             )
@@ -86,7 +115,8 @@ class AccessibilityTreeExtractor(private val service: AutomationService) {
             ?: ""
     }
 
-    private fun classNameToElementType(className: String?): ElementType {
+    @androidx.annotation.VisibleForTesting
+    internal fun classNameToElementType(className: String?): ElementType {
         if (className == null) return ElementType.UNKNOWN
         return when {
             className.contains("Button") -> ElementType.BUTTON

@@ -12,6 +12,9 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
 class OCRClient(private val secureStorage: SecureStorage) {
@@ -24,30 +27,32 @@ class OCRClient(private val secureStorage: SecureStorage) {
         .build()
 
     suspend fun recognizeText(screenshotInfo: ScreenshotInfo): List<UIElement> {
-        val googleApiKey = secureStorage.getGoogleVisionApiKey()
-        if (!googleApiKey.isNullOrBlank()) {
-            try {
-                val blocks = recognizeWithGoogleVision(screenshotInfo, googleApiKey)
-                if (blocks.isNotEmpty()) {
-                    return blocksToUIElements(blocks)
+        return withContext(Dispatchers.IO) {
+            val googleApiKey = secureStorage.getGoogleVisionApiKey()
+            if (!googleApiKey.isNullOrBlank()) {
+                try {
+                    val blocks = recognizeWithGoogleVision(screenshotInfo, googleApiKey)
+                    if (blocks.isNotEmpty()) {
+                        return@withContext blocksToUIElements(blocks)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Google Vision failed, trying fallback", e)
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "Google Vision failed, trying fallback", e)
             }
-        }
 
-        val replicateToken = secureStorage.getReplicateApiToken()
-        if (!replicateToken.isNullOrBlank()) {
-            try {
-                val blocks = recognizeWithReplicate(screenshotInfo, replicateToken)
-                return blocksToUIElements(blocks)
-            } catch (e: Exception) {
-                Log.w(TAG, "Replicate OCR also failed", e)
+            val replicateToken = secureStorage.getReplicateApiToken()
+            if (!replicateToken.isNullOrBlank()) {
+                try {
+                    val blocks = recognizeWithReplicate(screenshotInfo, replicateToken)
+                    return@withContext blocksToUIElements(blocks)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Replicate OCR also failed", e)
+                }
             }
-        }
 
-        Log.d(TAG, "No OCR providers configured or all failed")
-        return emptyList()
+            Log.d(TAG, "No OCR providers configured or all failed")
+            emptyList()
+        }
     }
 
     private fun recognizeWithGoogleVision(
@@ -107,7 +112,7 @@ class OCRClient(private val secureStorage: SecureStorage) {
         }
     }
 
-    private fun recognizeWithReplicate(
+    private suspend fun recognizeWithReplicate(
         screenshotInfo: ScreenshotInfo,
         apiToken: String
     ): List<OCRTextBlock> {
@@ -142,7 +147,7 @@ class OCRClient(private val secureStorage: SecureStorage) {
         val timeout = 15000L
 
         while (System.currentTimeMillis() - startTime < timeout) {
-            Thread.sleep(1000)
+            delay(1000)
             val pollRequest = Request.Builder()
                 .url(getUrl)
                 .header("Authorization", "Token $apiToken")

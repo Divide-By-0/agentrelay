@@ -10,13 +10,15 @@ import kotlinx.coroutines.delay
 
 class AccessibilityTreeExtractor(private val service: AutomationService) {
 
-    suspend fun extract(): List<UIElement> {
-        var root: AccessibilityNodeInfo? = null
-        for (attempt in 1..3) {
-            root = service.getRootNode()
-            if (root != null) break
-            Log.w(TAG, "Root node null, retry $attempt/3")
-            delay(200)
+    suspend fun extract(rootOverride: AccessibilityNodeInfo? = null): List<UIElement> {
+        var root: AccessibilityNodeInfo? = rootOverride
+        if (root == null) {
+            for (attempt in 1..3) {
+                root = service.getRootNode()
+                if (root != null) break
+                Log.w(TAG, "Root node null, retry $attempt/3")
+                delay(200)
+            }
         }
 
         if (root == null) {

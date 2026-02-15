@@ -3,15 +3,16 @@ package com.agentrelay
 import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.os.Looper
 import android.util.Log
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
+import android.widget.*
 import androidx.cardview.widget.CardView
 import java.text.SimpleDateFormat
 import java.util.*
@@ -25,172 +26,221 @@ class StatusOverlay(private val context: Context) {
     private var resizeHandle: View? = null
     private var stopButton: View? = null
     private var collapseButton: TextView? = null
+    private var contentBody: View? = null
     private var isShowing = false
     private val statusMessages = mutableListOf<String>()
-    private var scrollViewHeight = 600 // Default height
+    private var scrollViewHeight = 500
 
-    // Persistent state that survives hide/show cycles
+    // Persistent state
     private var savedIsCollapsed = false
     private var savedX = 20
     private var savedY = 200
     private var hasSavedPosition = false
+    private var invisibleSince = 0L
+
+    // iOS colors
+    private val cardBg = Color.WHITE
+    private val headerBg = Color.parseColor("#F2F2F7")
+    private val labelColor = Color.parseColor("#000000")
+    private val secondaryLabel = Color.parseColor("#6D6D72")
+    private val tertiaryLabel = Color.parseColor("#9898A0")
+    private val logBg = Color.parseColor("#F2F2F7")
+    private val logText = Color.parseColor("#1C1C1E")
+    private val accentBlue = Color.parseColor("#007AFF")
+    private val stopRed = Color.parseColor("#FF3B30")
+    private val separatorColor = Color.parseColor("#E5E5EA")
+    private val handleColor = Color.parseColor("#D1D1D6")
+
+    private fun dp(value: Int): Int {
+        return TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_DIP, value.toFloat(),
+            context.resources.displayMetrics
+        ).toInt()
+    }
+
+    fun setInvisible(invisible: Boolean) {
+        val action = Runnable {
+            if (invisible) {
+                invisibleSince = System.currentTimeMillis()
+                Log.d(TAG, "setInvisible(true)")
+            } else {
+                val dur = if (invisibleSince > 0) System.currentTimeMillis() - invisibleSince else 0
+                Log.d(TAG, "setInvisible(false) — was invisible for ${dur}ms")
+                invisibleSince = 0
+            }
+            overlayView?.visibility = if (invisible) View.INVISIBLE else View.VISIBLE
+        }
+        // Run directly if on main thread to avoid post{} deferral
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action.run()
+        } else {
+            overlayView?.post(action)
+        }
+    }
+
+    /**
+     * Makes the overlay pass-through so gestures go to the real UI behind it.
+     * Call with true before executing agent taps, false after.
+     */
+    fun setPassThrough(passThrough: Boolean) {
+        val action = Runnable {
+            try {
+                val lp = overlayView?.layoutParams as? WindowManager.LayoutParams ?: return@Runnable
+                if (passThrough) {
+                    lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                } else {
+                    lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                }
+                windowManager.updateViewLayout(overlayView, lp)
+            } catch (e: Exception) {
+                Log.w(TAG, "setPassThrough($passThrough) failed", e)
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action.run()
+        } else {
+            overlayView?.post(action)
+        }
+    }
 
     fun show() {
         if (isShowing) return
 
-        val container = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, 0, 0, 0)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+        val container = FrameLayout(context).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
             )
         }
 
-        // Card container
         val card = CardView(context).apply {
-            radius = 16f
-            cardElevation = 12f
-            setCardBackgroundColor(Color.parseColor("#2B2826"))
-            layoutParams = LinearLayout.LayoutParams(
-                600,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
+            radius = dp(14).toFloat()
+            cardElevation = dp(16).toFloat()
+            setCardBackgroundColor(cardBg)
+            layoutParams = FrameLayout.LayoutParams(dp(300), FrameLayout.LayoutParams.WRAP_CONTENT)
         }
 
         val innerLayout = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(20, 20, 20, 20)
         }
 
-        // Header (draggable)
+        // Header bar
         val headerLayout = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = 12
+            )
+            background = GradientDrawable().apply {
+                setColor(headerBg)
+                cornerRadii = floatArrayOf(
+                    dp(14).toFloat(), dp(14).toFloat(),
+                    dp(14).toFloat(), dp(14).toFloat(),
+                    0f, 0f, 0f, 0f
+                )
             }
-            setBackgroundColor(Color.parseColor("#3A3734"))
-            setPadding(16, 12, 16, 12)
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(Color.parseColor("#3A3734"))
-                cornerRadius = 8f
-            }
+            setPadding(dp(16), dp(12), dp(12), dp(12))
         }
 
-        val icon = TextView(context).apply {
-            text = "🤖"
-            textSize = 18f
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                marginEnd = 8
+        // Status dot
+        val statusDot = View(context).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(8), dp(8)).apply {
+                marginEnd = dp(8)
+            }
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#34C759"))
             }
         }
 
         val titleText = TextView(context).apply {
-            text = "Agent Status"
-            setTextColor(Color.parseColor("#E8E3E0"))
+            text = "Agent Log"
+            setTextColor(labelColor)
             textSize = 16f
-            typeface = android.graphics.Typeface.create(
-                android.graphics.Typeface.DEFAULT,
-                android.graphics.Typeface.BOLD
-            )
-            layoutParams = LinearLayout.LayoutParams(
-                0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                1f
-            )
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
 
-        val collapseButton = TextView(context).apply {
-            text = "▼"
-            setTextColor(Color.parseColor("#999999"))
-            textSize = 16f
-            setPadding(8, 0, 8, 0)
-            setOnClickListener {
-                toggleCollapse()
-            }
+        val collapseBtn = TextView(context).apply {
+            text = if (savedIsCollapsed) "+" else "−"
+            setTextColor(accentBlue)
+            textSize = 22f
+            typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(dp(32), dp(32))
+            setOnClickListener { toggleCollapse() }
         }
+        this.collapseButton = collapseBtn
 
-        // Store reference for collapse/expand
-        this.collapseButton = collapseButton
-
-        val dragHint = TextView(context).apply {
-            text = "⋮⋮"
-            setTextColor(Color.parseColor("#999999"))
-            textSize = 16f
-        }
-
-        headerLayout.addView(icon)
+        headerLayout.addView(statusDot)
         headerLayout.addView(titleText)
-        headerLayout.addView(collapseButton)
-        headerLayout.addView(dragHint)
+        headerLayout.addView(collapseBtn)
 
-        val scrollView = ScrollView(context).apply {
-            id = android.view.View.generateViewId()
+        // Content body (log + resize + stop) — hidden when collapsed
+        val body = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(8), dp(12), dp(12))
+        }
+        this.contentBody = body
+
+        // Log scroll area
+        val sv = ScrollView(context).apply {
+            id = View.generateViewId()
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 scrollViewHeight
-            ).apply {
-                bottomMargin = 12
+            ).apply { bottomMargin = dp(8) }
+            background = GradientDrawable().apply {
+                setColor(logBg)
+                cornerRadius = dp(10).toFloat()
             }
-            setBackgroundColor(Color.parseColor("#1A1818"))
-            setPadding(12, 12, 12, 12)
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(Color.parseColor("#1A1818"))
-                cornerRadius = 8f
-            }
+            setPadding(dp(12), dp(10), dp(12), dp(10))
         }
 
         statusText = TextView(context).apply {
-            setTextColor(Color.parseColor("#E8E3E0"))
-            textSize = 11f
-            setPadding(8, 8, 8, 8)
+            setTextColor(logText)
+            textSize = 11.5f
+            typeface = Typeface.MONOSPACE
+            setLineSpacing(dp(2).toFloat(), 1f)
         }
 
-        scrollView.addView(statusText)
-
-        // Store scrollView reference for autoscroll and collapse
-        this.scrollView = scrollView
+        sv.addView(statusText)
+        this.scrollView = sv
 
         // Resize handle
-        val resizeHandle = TextView(context).apply {
-            text = "⋮⋮⋮"
-            gravity = android.view.Gravity.CENTER
-            setTextColor(Color.parseColor("#666666"))
-            textSize = 12f
+        val resizeBar = LinearLayout(context).apply {
+            gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = 8
-            }
-            setPadding(0, 8, 0, 8)
+                dp(20)
+            )
         }
+        val resizePill = View(context).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(40), dp(4))
+            background = GradientDrawable().apply {
+                setColor(handleColor)
+                cornerRadius = dp(2).toFloat()
+            }
+        }
+        resizeBar.addView(resizePill)
+        this.resizeHandle = resizeBar
 
-        // Store reference for collapse/expand
-        this.resizeHandle = resizeHandle
-
-        // Make resize handle draggable
+        // Resize touch handling
         var initialResizeHeight = 0
         var initialResizeTouchY = 0f
-        resizeHandle.setOnTouchListener { v, event ->
+        resizeBar.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
-                    initialResizeHeight = scrollView.layoutParams.height
+                    initialResizeHeight = sv.layoutParams.height
                     initialResizeTouchY = event.rawY
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val deltaY = (event.rawY - initialResizeTouchY).toInt()
-                    val newHeight = (initialResizeHeight + deltaY).coerceIn(200, 1200)
-                    scrollView.layoutParams.height = newHeight
-                    scrollView.requestLayout()
+                    val newHeight = (initialResizeHeight + deltaY).coerceIn(dp(100), dp(500))
+                    sv.layoutParams.height = newHeight
+                    sv.requestLayout()
                     scrollViewHeight = newHeight
                     true
                 }
@@ -199,35 +249,41 @@ class StatusOverlay(private val context: Context) {
         }
 
         // Stop button
-        val stopButton = Button(context).apply {
-            text = "⏹ Stop Agent"
-            setTextColor(Color.WHITE)
+        val stopBtn = TextView(context).apply {
+            text = "Stop Agent"
+            setTextColor(stopRed)
+            textSize = 15f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(Color.parseColor("#D32F2F"))
-                cornerRadius = 8f
+                dp(44)
+            ).apply { topMargin = dp(4) }
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#FFF2F1"))
+                cornerRadius = dp(10).toFloat()
             }
-            setPadding(16, 16, 16, 16)
-            isAllCaps = false
-            typeface = android.graphics.Typeface.create(
-                android.graphics.Typeface.DEFAULT,
-                android.graphics.Typeface.BOLD
-            )
             setOnClickListener {
                 AgentOrchestrator.getInstance(context).stop()
             }
         }
+        this.stopButton = stopBtn
 
-        // Store reference for collapse/expand
-        this.stopButton = stopButton
+        body.addView(sv)
+        body.addView(resizeBar)
+        body.addView(stopBtn)
+
+        // Separator
+        val sep = View(context).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 1
+            )
+            setBackgroundColor(separatorColor)
+        }
 
         innerLayout.addView(headerLayout)
-        innerLayout.addView(scrollView)
-        innerLayout.addView(resizeHandle)
-        innerLayout.addView(stopButton)
+        innerLayout.addView(sep)
+        innerLayout.addView(body)
 
         card.addView(innerLayout)
         container.addView(card)
@@ -248,13 +304,13 @@ class StatusOverlay(private val context: Context) {
             y = savedY
         }
 
-        // Make draggable by header
+        // Drag by header
         var initialX = 0
         var initialY = 0
         var initialTouchX = 0f
         var initialTouchY = 0f
 
-        headerLayout.setOnTouchListener { v, event ->
+        headerLayout.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
                     initialX = params.x
@@ -264,11 +320,8 @@ class StatusOverlay(private val context: Context) {
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    // For Gravity.END, x increases as we move LEFT (away from right edge)
-                    // So we need to subtract the delta to make dragging feel natural
                     params.x = initialX - (event.rawX - initialTouchX).toInt()
                     params.y = initialY + (event.rawY - initialTouchY).toInt()
-                    // Persist position so it survives hide/show cycles
                     savedX = params.x
                     savedY = params.y
                     hasSavedPosition = true
@@ -283,14 +336,10 @@ class StatusOverlay(private val context: Context) {
             windowManager.addView(container, params)
             isShowing = true
 
-            // Restore saved collapse state
             if (savedIsCollapsed) {
-                // Apply collapse without animation
-                val visibility = android.view.View.GONE
-                scrollView?.visibility = visibility
-                resizeHandle?.visibility = visibility
-                stopButton?.visibility = visibility
-                collapseButton?.text = "▶"
+                body.visibility = View.GONE
+                sep.visibility = View.GONE
+                collapseBtn.text = "+"
             }
 
             Log.d(TAG, "Status overlay shown (collapsed=$savedIsCollapsed)")
@@ -312,6 +361,7 @@ class StatusOverlay(private val context: Context) {
                 resizeHandle = null
                 stopButton = null
                 collapseButton = null
+                contentBody = null
                 Log.d(TAG, "Status overlay hidden")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to hide status overlay", e)
@@ -325,23 +375,19 @@ class StatusOverlay(private val context: Context) {
 
         statusMessages.add(formattedMessage)
 
-        // Keep only last 50 messages
         if (statusMessages.size > 50) {
             statusMessages.removeAt(0)
         }
 
         updateDisplay()
-
-        // Notify main app
         StatusBroadcaster.broadcast(context, formattedMessage)
     }
 
     private fun updateDisplay() {
         statusText?.post {
             statusText?.text = statusMessages.joinToString("\n")
-            // Autoscroll to bottom after text update
             scrollView?.post {
-                scrollView?.fullScroll(android.view.View.FOCUS_DOWN)
+                scrollView?.fullScroll(View.FOCUS_DOWN)
             }
         }
     }
@@ -354,15 +400,17 @@ class StatusOverlay(private val context: Context) {
     private fun toggleCollapse() {
         savedIsCollapsed = !savedIsCollapsed
 
-        // Update visibility
-        val visibility = if (savedIsCollapsed) android.view.View.GONE else android.view.View.VISIBLE
-        scrollView?.visibility = visibility
-        resizeHandle?.visibility = visibility
-        stopButton?.visibility = visibility
+        val visibility = if (savedIsCollapsed) View.GONE else View.VISIBLE
+        contentBody?.visibility = visibility
+        // Also hide separator (it's the sibling right before contentBody)
+        (contentBody?.parent as? LinearLayout)?.let { parent ->
+            val bodyIndex = parent.indexOfChild(contentBody as View)
+            if (bodyIndex > 0) {
+                parent.getChildAt(bodyIndex - 1)?.visibility = visibility
+            }
+        }
 
-        // Update collapse button icon
-        collapseButton?.text = if (savedIsCollapsed) "▶" else "▼"
-
+        collapseButton?.text = if (savedIsCollapsed) "+" else "−"
         Log.d(TAG, "Toggled collapse: isCollapsed=$savedIsCollapsed")
     }
 

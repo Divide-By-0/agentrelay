@@ -201,6 +201,14 @@ class SecureStorage(context: Context) {
         return sharedPreferences.getBoolean(KEY_PLANNING_ENABLED, true)
     }
 
+    fun setSendScreenshotsToLlm(enabled: Boolean) {
+        sharedPreferences.edit().putBoolean(KEY_SEND_SCREENSHOTS_TO_LLM, enabled).apply()
+    }
+
+    fun getSendScreenshotsToLlm(): Boolean {
+        return sharedPreferences.getBoolean(KEY_SEND_SCREENSHOTS_TO_LLM, true)
+    }
+
     fun savePlanningModel(model: String) {
         sharedPreferences.edit().putString(KEY_PLANNING_MODEL, model).apply()
     }
@@ -223,6 +231,7 @@ class SecureStorage(context: Context) {
         private const val KEY_VERIFICATION_ENABLED = "verification_enabled"
         private const val KEY_FLOATING_BUBBLE = "floating_bubble_enabled"
         private const val KEY_PLANNING_ENABLED = "planning_enabled"
+        private const val KEY_SEND_SCREENSHOTS_TO_LLM = "send_screenshots_to_llm"
         private const val KEY_PLANNING_MODEL = "planning_model"
 
         fun providerForModel(model: String): Provider {

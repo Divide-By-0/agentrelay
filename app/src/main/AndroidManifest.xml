@@ -35,6 +35,14 @@
             </intent-filter>
         </activity>
 
+        <!-- Transparent activity for requesting screen capture from overlay/service -->
+        <activity
+            android:name=".ScreenCaptureRequestActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:taskAffinity="" />
+
         <!-- Accessibility Service -->
         <service
             android:name=".AutomationService"

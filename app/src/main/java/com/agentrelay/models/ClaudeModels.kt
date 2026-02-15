@@ -131,7 +131,7 @@ data class ElementMap(
 }
 
 enum class SemanticAction {
-    CLICK, TYPE, SWIPE, BACK, HOME, WAIT, COMPLETE
+    CLICK, LONG_PRESS, TYPE, SWIPE, BACK, HOME, WAIT, COMPLETE, OPEN_APP, DISMISS_KEYBOARD, SHARE_FINDING
 }
 
 data class SemanticStep(
@@ -139,10 +139,16 @@ data class SemanticStep(
     val element: String? = null,
     val text: String? = null,
     val direction: String? = null,
-    val description: String = ""
+    val packageName: String? = null,
+    val durationMs: Long? = null, // for long_press
+    val description: String = "",
+    val findingKey: String? = null,    // for SHARE_FINDING
+    val findingValue: String? = null   // for SHARE_FINDING
 )
 
 data class SemanticActionPlan(
     val steps: List<SemanticStep>,
-    val reasoning: String = ""
+    val reasoning: String = "",
+    val confidence: String = "",      // "high", "medium", "low"
+    val progressAssessment: String = "" // how the task is going overall
 )

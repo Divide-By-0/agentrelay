@@ -6,6 +6,7 @@ import android.content.Context
 import android.graphics.Path
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import android.os.Bundle
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import kotlinx.coroutines.CoroutineScope
@@ -32,6 +33,8 @@ class AutomationService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         Log.d(TAG, "AutomationService connected")
+        // Pre-cache installed apps list in background
+        DeviceContextCache.refreshAsync(this)
     }
 
     override fun onDestroy() {
@@ -89,6 +92,37 @@ class AutomationService : AccessibilityService() {
         }
     }
 
+    /**
+     * Performs a long press at the given coordinates for the specified duration.
+     */
+    suspend fun performLongPress(x: Int, y: Int, durationMs: Long = 1000): Boolean {
+        return suspendCancellableCoroutine { continuation ->
+            Log.d(TAG, "Performing long press at ($x, $y) for ${durationMs}ms")
+            val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
+            val gestureBuilder = GestureDescription.Builder()
+            val gesture = gestureBuilder
+                .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+                .build()
+
+            val callback = object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    Log.d(TAG, "Long press completed at ($x, $y)")
+                    if (continuation.isActive) continuation.resume(true)
+                }
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    Log.e(TAG, "Long press cancelled at ($x, $y)")
+                    if (continuation.isActive) continuation.resume(false)
+                }
+            }
+
+            val dispatched = dispatchGesture(gesture, callback, null)
+            if (!dispatched) {
+                Log.e(TAG, "Failed to dispatch long press gesture")
+                if (continuation.isActive) continuation.resume(false)
+            }
+        }
+    }
+
     suspend fun performSwipe(startX: Int, startY: Int, endX: Int, endY: Int, duration: Long = 500): Boolean {
         return suspendCancellableCoroutine { continuation ->
             val path = Path().apply {
@@ -130,18 +164,193 @@ class AutomationService : AccessibilityService() {
     }
 
     suspend fun performType(text: String): Boolean {
-        // Typing is done by copying to clipboard
-        // The user can then manually paste or the agent can tap the paste button
+        return try {
+            // Strategy 1: ACTION_SET_TEXT (most reliable, works on most standard fields)
+            if (trySetText(text)) return true
+
+            // Strategy 2: Clipboard paste
+            if (tryClipboardPaste(text)) {
+                delay(200)
+                if (verifyTextEntered(text)) return true
+                Log.w(TAG, "Paste reported success but text not verified, trying fallback")
+            }
+
+            // Strategy 3: Character-by-character key dispatch via InputConnection
+            Log.d(TAG, "Falling back to character-by-character input")
+            if (tryKeyboardInput(text)) return true
+
+            // Strategy 4: Last resort - set text on any editable node on screen
+            if (trySetTextOnAnyEditable(text)) return true
+
+            Log.e(TAG, "All text input strategies failed for: ${text.take(50)}")
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to type text", e)
+            false
+        }
+    }
+
+    private fun trySetText(text: String): Boolean {
+        val node = findFocusedInputNode() ?: return false
+        return try {
+            val args = Bundle()
+            args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            val success = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            if (success) Log.d(TAG, "Text set via ACTION_SET_TEXT: ${text.take(50)}")
+            else Log.w(TAG, "ACTION_SET_TEXT returned false")
+            success
+        } finally {
+            node.recycle()
+        }
+    }
+
+    private suspend fun tryClipboardPaste(text: String): Boolean {
         return try {
             val clipboardManager = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
             val clip = android.content.ClipData.newPlainText("agent_text", text)
             clipboardManager.setPrimaryClip(clip)
             delay(100)
-            Log.d(TAG, "Text copied to clipboard: $text")
-            true
+            val pasteNode = findFocusedInputNode() ?: return false
+            try {
+                val pasted = pasteNode.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+                if (pasted) Log.d(TAG, "Text pasted via ACTION_PASTE: ${text.take(50)}")
+                pasted
+            } finally {
+                pasteNode.recycle()
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to copy text to clipboard", e)
+            Log.w(TAG, "Clipboard paste failed", e)
             false
+        }
+    }
+
+    private suspend fun tryKeyboardInput(text: String): Boolean {
+        // Clear any existing text first, then type character by character via SET_TEXT
+        // This works by building up the text incrementally, which triggers
+        // the input connection on apps that reject bulk SET_TEXT
+        val node = findFocusedInputNode() ?: return false
+        return try {
+            // First clear the field
+            val clearArgs = Bundle()
+            clearArgs.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
+            node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clearArgs)
+            delay(50)
+
+            // Type character by character
+            val sb = StringBuilder()
+            for (char in text) {
+                sb.append(char)
+                val args = Bundle()
+                args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, sb.toString())
+                val ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                if (!ok) {
+                    Log.w(TAG, "Character-by-character input failed at position ${sb.length}")
+                    return false
+                }
+                delay(15) // Small delay between characters
+            }
+            Log.d(TAG, "Text entered char-by-char: ${text.take(50)}")
+            true
+        } finally {
+            node.recycle()
+        }
+    }
+
+    private fun trySetTextOnAnyEditable(text: String): Boolean {
+        // Walk the tree to find any editable/focusable text field
+        val root = rootInActiveWindow ?: return false
+        val editableNode = findEditableNode(root)
+        if (editableNode != null) {
+            try {
+                // Focus it first
+                editableNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                val args = Bundle()
+                args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+                val success = editableNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                if (success) {
+                    Log.d(TAG, "Text set on editable node found by tree walk: ${text.take(50)}")
+                    return true
+                }
+            } finally {
+                editableNode.recycle()
+            }
+        }
+        return false
+    }
+
+    private fun findEditableNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        if (node.isEditable) return AccessibilityNodeInfo.obtain(node)
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val result = findEditableNode(child)
+            child.recycle()
+            if (result != null) return result
+        }
+        return null
+    }
+
+    /**
+     * Verify that text was actually entered into the focused field.
+     */
+    fun verifyTextEntered(expectedText: String): Boolean {
+        val node = findFocusedInputNode() ?: return false
+        return try {
+            val actualText = node.text?.toString() ?: ""
+            val contains = actualText.contains(expectedText, ignoreCase = true)
+            if (!contains) {
+                Log.w(TAG, "Text verification failed: expected '${expectedText.take(30)}' but field contains '${actualText.take(30)}'")
+            }
+            contains
+        } finally {
+            node.recycle()
+        }
+    }
+
+    /**
+     * Read the text content of the currently focused input field.
+     */
+    fun readFocusedFieldText(): String? {
+        val node = findFocusedInputNode() ?: return null
+        return try {
+            node.text?.toString()
+        } finally {
+            node.recycle()
+        }
+    }
+
+    private fun findFocusedInputNode(): AccessibilityNodeInfo? {
+        return try {
+            rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                ?: rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to find focused node", e)
+            null
+        }
+    }
+
+    fun performOpenApp(packageName: String): Boolean {
+        return try {
+            val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+            if (launchIntent != null) {
+                launchIntent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(launchIntent)
+                Log.d(TAG, "Launched app: $packageName")
+                true
+            } else {
+                Log.e(TAG, "No launch intent for package: $packageName")
+                false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to launch app: $packageName", e)
+            false
+        }
+    }
+
+    fun getCurrentAppPackage(): String? {
+        return try {
+            rootInActiveWindow?.packageName?.toString()
+        } catch (e: Exception) {
+            null
         }
     }
 
@@ -151,6 +360,18 @@ class AutomationService : AccessibilityService() {
 
     suspend fun performHome(): Boolean {
         return performGlobalAction(GLOBAL_ACTION_HOME)
+    }
+
+    fun isKeyboardShowing(): Boolean {
+        return try {
+            windows?.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD } ?: false
+        } catch (_: Exception) { false }
+    }
+
+    suspend fun dismissKeyboard(): Boolean {
+        if (!isKeyboardShowing()) return true // Already dismissed
+        Log.d(TAG, "Dismissing keyboard via back action")
+        return performGlobalAction(GLOBAL_ACTION_BACK)
     }
 
     fun getRootNode(): AccessibilityNodeInfo? {
@@ -200,19 +421,12 @@ class AutomationService : AccessibilityService() {
         val timeFormat = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss z", java.util.Locale.getDefault())
         val currentTime = timeFormat.format(java.util.Date())
 
-        // Installed apps (launchable only)
-        val installedApps = try {
-            val pm = packageManager
-            val intent = android.content.Intent(android.content.Intent.ACTION_MAIN, null)
-            intent.addCategory(android.content.Intent.CATEGORY_LAUNCHER)
-            val resolveInfos = pm.queryIntentActivities(intent, 0)
-            resolveInfos.map { ri ->
-                AppInfo(
-                    name = ri.loadLabel(pm).toString(),
-                    packageName = ri.activityInfo.packageName
-                )
-            }.distinctBy { it.packageName }.sortedBy { it.name.lowercase() }
-        } catch (_: Exception) { emptyList() }
+        // Installed apps — use pre-cached list (refreshed on service connect / app open)
+        val installedApps = DeviceContextCache.installedApps.ifEmpty {
+            // Fallback: cache not ready yet, trigger async refresh and use empty for now
+            DeviceContextCache.refreshAsync(this)
+            emptyList()
+        }
 
         root?.recycle()
 
@@ -224,6 +438,62 @@ class AutomationService : AccessibilityService() {
             currentTime = currentTime,
             installedApps = installedApps
         )
+    }
+
+    /**
+     * Returns application windows with their screen bounds, sorted by vertical position.
+     */
+    fun getAppWindows(): List<Pair<AccessibilityWindowInfo, android.graphics.Rect>> {
+        return try {
+            windows?.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+                ?.map { window ->
+                    val bounds = android.graphics.Rect()
+                    window.getBoundsInScreen(bounds)
+                    window to bounds
+                }
+                ?.sortedBy { it.second.top }
+                ?: emptyList()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get app windows", e)
+            emptyList()
+        }
+    }
+
+    /**
+     * Triggers split-screen mode via global action.
+     */
+    fun enterSplitScreen(): Boolean {
+        return try {
+            performGlobalAction(GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to enter split screen", e)
+            false
+        }
+    }
+
+    /**
+     * Launches an app in the adjacent split-screen slot.
+     */
+    fun launchAppAdjacent(packageName: String): Boolean {
+        return try {
+            val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+            if (launchIntent != null) {
+                launchIntent.addFlags(
+                    android.content.Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT or
+                    android.content.Intent.FLAG_ACTIVITY_MULTIPLE_TASK or
+                    android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                )
+                startActivity(launchIntent)
+                Log.d(TAG, "Launched app adjacent: $packageName")
+                true
+            } else {
+                Log.e(TAG, "No launch intent for adjacent package: $packageName")
+                false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to launch app adjacent: $packageName", e)
+            false
+        }
     }
 
     companion object {

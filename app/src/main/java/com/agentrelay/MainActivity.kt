@@ -41,8 +41,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.core.app.ActivityCompat
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -89,6 +96,8 @@ class MainActivity : ComponentActivity() {
 
         requestPermissions()
         autoRestartServiceIfNeeded()
+        // Pre-cache installed apps list in background
+        DeviceContextCache.refreshAsync(this)
     }
 
     override fun onStop() {
@@ -446,7 +455,7 @@ fun AgentTab(
             }
         }
 
-        Spacer(modifier = Modifier.height(28.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
         // Activity feed
         if (conversationItems.isEmpty()) {
@@ -508,6 +517,393 @@ fun AgentTab(
     }
 }
 
+// ─── Debug Tap Tool ───────────────────────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DebugTapTool(modifier: Modifier = Modifier) {
+    var expanded by remember { mutableStateOf(false) }
+    var xText by remember { mutableStateOf("") }
+    var yText by remember { mutableStateOf("") }
+    var durationText by remember { mutableStateOf("50") }
+    var resultText by remember { mutableStateOf<String?>(null) }
+    val coroutineScope = rememberCoroutineScope()
+
+    IOSGroupedCard(modifier = modifier) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(horizontal = 16.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(30.dp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(Color(0xFF5856D6)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Default.TouchApp,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Debug Tap", fontSize = 17.sp, color = IOSLabel)
+                Text(
+                    "Send a tap/long-press at coordinates",
+                    fontSize = 13.sp,
+                    color = IOSSecondaryLabel
+                )
+            }
+            Icon(
+                if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                contentDescription = null,
+                tint = IOSGray2,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+
+        if (expanded) {
+            Divider(color = IOSSeparator, modifier = Modifier.padding(start = 58.dp))
+            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = xText,
+                        onValueChange = { xText = it.filter { c -> c.isDigit() } },
+                        label = { Text("X", fontSize = 12.sp) },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        shape = RoundedCornerShape(8.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = IOSBlue,
+                            unfocusedBorderColor = IOSGray4,
+                            cursorColor = IOSBlue,
+                            focusedContainerColor = Color.White,
+                            unfocusedContainerColor = Color.White
+                        )
+                    )
+                    OutlinedTextField(
+                        value = yText,
+                        onValueChange = { yText = it.filter { c -> c.isDigit() } },
+                        label = { Text("Y", fontSize = 12.sp) },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        shape = RoundedCornerShape(8.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = IOSBlue,
+                            unfocusedBorderColor = IOSGray4,
+                            cursorColor = IOSBlue,
+                            focusedContainerColor = Color.White,
+                            unfocusedContainerColor = Color.White
+                        )
+                    )
+                    OutlinedTextField(
+                        value = durationText,
+                        onValueChange = { durationText = it.filter { c -> c.isDigit() } },
+                        label = { Text("ms", fontSize = 12.sp) },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        shape = RoundedCornerShape(8.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = IOSBlue,
+                            unfocusedBorderColor = IOSGray4,
+                            cursorColor = IOSBlue,
+                            focusedContainerColor = Color.White,
+                            unfocusedContainerColor = Color.White
+                        )
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "ms = hold duration. 50 = normal tap, 500+ = long press",
+                    fontSize = 11.sp,
+                    color = IOSTertiaryLabel
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = {
+                        val x = xText.toIntOrNull()
+                        val y = yText.toIntOrNull()
+                        val dur = durationText.toLongOrNull() ?: 50L
+                        if (x == null || y == null) {
+                            resultText = "Enter valid X and Y"
+                            return@Button
+                        }
+                        val automationService = AutomationService.instance
+                        if (automationService == null) {
+                            resultText = "Accessibility service not running"
+                            return@Button
+                        }
+                        resultText = "Tapping ($x, $y) for ${dur}ms..."
+                        coroutineScope.launch {
+                            val startTime = System.currentTimeMillis()
+                            val ok = if (dur <= 100) {
+                                automationService.performTap(x, y)
+                            } else {
+                                automationService.performLongPress(x, y, dur)
+                            }
+                            val elapsed = System.currentTimeMillis() - startTime
+                            resultText = if (ok) {
+                                "Tap at ($x, $y) ${dur}ms — OK (${elapsed}ms)"
+                            } else {
+                                "Tap at ($x, $y) ${dur}ms — FAILED (${elapsed}ms)"
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(40.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5856D6))
+                ) {
+                    Text("Execute Tap", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                }
+                resultText?.let {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        it,
+                        fontSize = 12.sp,
+                        color = if (it.contains("FAILED")) IOSRed else IOSGreen,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ─── Element Map Parsing & Overlay ─────────────────────────────────────────────
+
+private data class ParsedElement(
+    val id: String,
+    val type: String,
+    val label: String,
+    val left: Int,
+    val top: Int,
+    val right: Int,
+    val bottom: Int,
+    val isClickable: Boolean = false
+)
+
+private data class ParsedElementMap(
+    val screenWidth: Int,
+    val screenHeight: Int,
+    val elements: List<ParsedElement>
+)
+
+private val elementMapHeaderRegex = Regex("""ELEMENT MAP \((\d+)x(\d+)\)""")
+private val elementLineRegex = Regex("""\[([^\]]+)]\s+(\S+)(.*?)\((\d+),(\d+),(\d+),(\d+)\)""")
+private val elementTextRegex = Regex(""""([^"]*?)"""")
+
+private fun parseElementMapText(text: String): ParsedElementMap? {
+    val elements = mutableListOf<ParsedElement>()
+    var screenWidth = 0
+    var screenHeight = 0
+
+    for (line in text.lines()) {
+        val headerMatch = elementMapHeaderRegex.find(line)
+        if (headerMatch != null) {
+            screenWidth = headerMatch.groupValues[1].toIntOrNull() ?: 0
+            screenHeight = headerMatch.groupValues[2].toIntOrNull() ?: 0
+            continue
+        }
+
+        val match = elementLineRegex.find(line) ?: continue
+        val id = match.groupValues[1]
+        val type = match.groupValues[2]
+        val middle = match.groupValues[3]
+        val label = elementTextRegex.find(middle)?.groupValues?.get(1) ?: id
+
+        elements.add(ParsedElement(
+            id = id,
+            type = type,
+            label = label.ifBlank { id },
+            left = match.groupValues[4].toIntOrNull() ?: 0,
+            top = match.groupValues[5].toIntOrNull() ?: 0,
+            right = match.groupValues[6].toIntOrNull() ?: 0,
+            bottom = match.groupValues[7].toIntOrNull() ?: 0,
+            isClickable = middle.contains("clickable")
+        ))
+    }
+
+    if (screenWidth <= 0 || screenHeight <= 0 || elements.isEmpty()) return null
+    return ParsedElementMap(screenWidth, screenHeight, elements)
+}
+
+@Composable
+private fun ElementOverlayImage(
+    imageBase64: String,
+    parsedMap: ParsedElementMap,
+    chosenElementId: String?,
+    modifier: Modifier = Modifier
+) {
+    val imageBitmap = remember(imageBase64) {
+        try {
+            val bytes = Base64.decode(imageBase64, Base64.DEFAULT)
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+        } catch (e: Exception) { null }
+    }
+    if (imageBitmap == null) return
+
+    var selectedElement by remember { mutableStateOf<ParsedElement?>(null) }
+    val density = LocalDensity.current
+
+    Column(modifier = modifier) {
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .border(1.dp, IOSGray4, RoundedCornerShape(8.dp))
+        ) {
+            val widthPx = with(density) { maxWidth.toPx() }
+            val bitmapAspect = imageBitmap.width.toFloat() / imageBitmap.height
+            val heightPx = widthPx / bitmapAspect
+            val heightDp = with(density) { heightPx.toDp() }
+
+            val scaleX = widthPx / parsedMap.screenWidth
+            val scaleY = heightPx / parsedMap.screenHeight
+
+            Image(
+                bitmap = imageBitmap,
+                contentDescription = "Screenshot with element overlays",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(heightDp),
+                contentScale = ContentScale.FillWidth
+            )
+
+            ElementBoundingBoxes(
+                elements = parsedMap.elements,
+                chosenElementId = chosenElementId,
+                selectedElement = selectedElement,
+                scaleX = scaleX,
+                scaleY = scaleY,
+                heightDp = heightDp,
+                onElementTapped = { tapped ->
+                    selectedElement = if (tapped == selectedElement) null else tapped
+                }
+            )
+        }
+
+        // Info card for selected element
+        selectedElement?.let { el ->
+            Spacer(modifier = Modifier.height(6.dp))
+            ElementInfoCard(el)
+        }
+    }
+}
+
+@Composable
+private fun ElementBoundingBoxes(
+    elements: List<ParsedElement>,
+    chosenElementId: String?,
+    selectedElement: ParsedElement?,
+    scaleX: Float,
+    scaleY: Float,
+    heightDp: androidx.compose.ui.unit.Dp,
+    onElementTapped: (ParsedElement?) -> Unit
+) {
+    Canvas(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(heightDp)
+            .pointerInput(elements) {
+                detectTapGestures { offset ->
+                    val candidates = elements.filter { el ->
+                        offset.x >= el.left * scaleX && offset.x <= el.right * scaleX &&
+                            offset.y >= el.top * scaleY && offset.y <= el.bottom * scaleY
+                    }
+                    onElementTapped(
+                        candidates.minByOrNull { (it.right - it.left) * (it.bottom - it.top) }
+                    )
+                }
+            }
+    ) {
+        for (el in elements) {
+            val isChosen = el.id == chosenElementId
+            val isSelected = el == selectedElement
+
+            val fillColor = when {
+                isSelected -> Color(0x400088FF)
+                isChosen -> Color(0x3000CC00)
+                el.isClickable -> Color(0x15FF8800)
+                else -> Color(0x08888888)
+            }
+            val borderColor = when {
+                isSelected -> Color(0xFF0088FF.toInt())
+                isChosen -> Color(0xFF00CC00.toInt())
+                el.isClickable -> Color(0x60FF8800)
+                else -> Color(0x30888888)
+            }
+
+            val topLeft = Offset(el.left * scaleX, el.top * scaleY)
+            val boxSize = Size(
+                (el.right - el.left) * scaleX,
+                (el.bottom - el.top) * scaleY
+            )
+
+            drawRect(color = fillColor, topLeft = topLeft, size = boxSize)
+            drawRect(
+                color = borderColor,
+                topLeft = topLeft,
+                size = boxSize,
+                style = Stroke(width = if (isChosen || isSelected) 2.5f else 1f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ElementInfoCard(el: ParsedElement) {
+    Surface(
+        color = Color(0xFFF0F4FF),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .background(IOSBlue.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    el.id,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = IOSBlue,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Column {
+                Text(
+                    "${el.type}: ${el.label}",
+                    fontSize = 12.sp,
+                    color = IOSLabel
+                )
+                Text(
+                    "(${el.left},${el.top}) - (${el.right},${el.bottom})" +
+                        if (el.isClickable) "  clickable" else "",
+                    fontSize = 10.sp,
+                    color = IOSTertiaryLabel,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                )
+            }
+        }
+    }
+}
+
+// ─── Activity Row ──────────────────────────────────────────────────────────────
+
 @Composable
 fun ActivityRow(item: ConversationItem) {
     var expanded by remember { mutableStateOf(false) }
@@ -518,6 +914,7 @@ fun ActivityRow(item: ConversationItem) {
         ConversationItem.ItemType.ACTION_EXECUTED -> IOSGreen
         ConversationItem.ItemType.SCREENSHOT_CAPTURED -> IOSOrange
         ConversationItem.ItemType.PLANNING -> Color(0xFF5856D6) // iOS purple
+        ConversationItem.ItemType.REASONING -> Color(0xFF34C759) // iOS green for thinking
         else -> IOSBlue
     }
     val icon = when (item.type) {
@@ -527,6 +924,7 @@ fun ActivityRow(item: ConversationItem) {
         ConversationItem.ItemType.ACTION_EXECUTED -> Icons.Default.CheckCircle
         ConversationItem.ItemType.ERROR -> Icons.Default.ErrorOutline
         ConversationItem.ItemType.PLANNING -> Icons.Default.Psychology
+        ConversationItem.ItemType.REASONING -> Icons.Default.AutoAwesome
     }
 
     Surface(
@@ -553,13 +951,23 @@ fun ActivityRow(item: ConversationItem) {
                 }
                 Spacer(modifier = Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
+                    val isReasoning = item.type == ConversationItem.ItemType.REASONING
                     Text(
                         item.status,
                         fontSize = 15.sp,
                         color = IOSLabel,
-                        maxLines = if (expanded) Int.MAX_VALUE else 1
+                        maxLines = if (expanded) Int.MAX_VALUE else if (isReasoning) 3 else 1
                     )
-                    if (item.actionDescription != null && !expanded) {
+                    if (isReasoning && !expanded) {
+                        // Show progress assessment as subtitle
+                        if (item.actionDescription != null) {
+                            Text(item.actionDescription, fontSize = 13.sp, color = IOSSecondaryLabel, maxLines = 2)
+                        }
+                        if (item.response != null) {
+                            val stepCount = item.response.lines().size
+                            Text("$stepCount steps planned", fontSize = 12.sp, color = IOSTertiaryLabel)
+                        }
+                    } else if (item.actionDescription != null && !expanded) {
                         Text(item.actionDescription, fontSize = 13.sp, color = IOSSecondaryLabel, maxLines = 1)
                     }
                 }
@@ -574,6 +982,19 @@ fun ActivityRow(item: ConversationItem) {
             // Expanded basic info
             if (expanded) {
                 Column(modifier = Modifier.padding(start = 58.dp, end = 16.dp, bottom = 12.dp)) {
+                    if (item.type == ConversationItem.ItemType.REASONING) {
+                        // Show progress assessment prominently
+                        item.actionDescription?.let {
+                            Text(it, fontSize = 14.sp, color = IOSSecondaryLabel)
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                        // Show step breakdown
+                        item.response?.let {
+                            Text("Planned steps:", fontSize = 12.sp, color = IOSTertiaryLabel, fontWeight = FontWeight.Medium)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(it, fontSize = 13.sp, color = IOSLabel, fontFamily = androidx.compose.ui.text.font.FontFamily.Default)
+                        }
+                    } else {
                     item.actionDescription?.let {
                         Text("Action: $it", fontSize = 13.sp, color = IOSBlue)
                         Spacer(modifier = Modifier.height(4.dp))
@@ -586,6 +1007,7 @@ fun ActivityRow(item: ConversationItem) {
                         Text("Prompt: $it", fontSize = 13.sp, color = IOSSecondaryLabel)
                         Spacer(modifier = Modifier.height(4.dp))
                     }
+                    } // end else (non-REASONING)
 
                     // Chosen element + coordinates (for ACTION_EXECUTED)
                     if (item.chosenElementId != null) {
@@ -708,7 +1130,7 @@ fun ActivityRow(item: ConversationItem) {
                         modifier = Modifier.weight(1f)
                     )
                     Text(
-                        "${item.elementMapText?.lines()?.size ?: 0} elements",
+                        "${item.elementMapText?.lines()?.count { it.trimStart().startsWith("[") } ?: 0} elements",
                         fontSize = 12.sp,
                         color = IOSTertiaryLabel
                     )
@@ -726,45 +1148,92 @@ fun ActivityRow(item: ConversationItem) {
                         modifier = Modifier
                             .padding(start = 58.dp, end = 16.dp, bottom = 12.dp)
                     ) {
-                        Surface(
-                            color = Color(0xFFF8F8FA),
-                            shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.fillMaxWidth()
+                        // Interactive bounding box overlay on screenshot
+                        val parsedMap = remember(item.elementMapText) {
+                            parseElementMapText(item.elementMapText)
+                        }
+                        val overlayImage = item.screenshot ?: item.annotatedScreenshot
+                        if (parsedMap != null && overlayImage != null) {
+                            Text(
+                                "Tap an element to inspect",
+                                fontSize = 11.sp,
+                                color = IOSTertiaryLabel,
+                                modifier = Modifier.padding(bottom = 4.dp)
+                            )
+                            ElementOverlayImage(
+                                imageBase64 = overlayImage,
+                                parsedMap = parsedMap,
+                                chosenElementId = item.chosenElementId,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+
+                        // Text list (collapsible)
+                        var textListExpanded by remember { mutableStateOf(false) }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { textListExpanded = !textListExpanded }
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            val scrollState = rememberScrollState()
-                            Column(
-                                modifier = Modifier
-                                    .padding(10.dp)
-                                    .heightIn(max = 300.dp)
-                                    .verticalScroll(scrollState)
+                            Text(
+                                "Raw Element List",
+                                fontSize = 11.sp,
+                                color = IOSTertiaryLabel,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Icon(
+                                if (textListExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = null,
+                                tint = IOSGray2,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+
+                        if (textListExpanded) {
+                            Surface(
+                                color = Color(0xFFF8F8FA),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                item.elementMapText.lines().forEach { line ->
-                                    val isChosenLine = item.chosenElementId != null &&
-                                            line.contains("[${item.chosenElementId}]")
-                                    Row(modifier = Modifier.fillMaxWidth()) {
-                                        if (isChosenLine) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .background(IOSBlue.copy(alpha = 0.12f), RoundedCornerShape(3.dp))
-                                                    .padding(horizontal = 4.dp, vertical = 1.dp)
-                                            ) {
+                                val scrollState = rememberScrollState()
+                                Column(
+                                    modifier = Modifier
+                                        .padding(10.dp)
+                                        .heightIn(max = 300.dp)
+                                        .verticalScroll(scrollState)
+                                ) {
+                                    item.elementMapText.lines().forEach { line ->
+                                        val isChosenLine = item.chosenElementId != null &&
+                                                line.contains("[${item.chosenElementId}]")
+                                        Row(modifier = Modifier.fillMaxWidth()) {
+                                            if (isChosenLine) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .background(IOSBlue.copy(alpha = 0.12f), RoundedCornerShape(3.dp))
+                                                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                                                ) {
+                                                    Text(
+                                                        line,
+                                                        fontSize = 10.sp,
+                                                        color = IOSBlue,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                                        maxLines = 2
+                                                    )
+                                                }
+                                            } else {
                                                 Text(
                                                     line,
                                                     fontSize = 10.sp,
-                                                    color = IOSBlue,
-                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = IOSSecondaryLabel,
                                                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                                                     maxLines = 2
                                                 )
                                             }
-                                        } else {
-                                            Text(
-                                                line,
-                                                fontSize = 10.sp,
-                                                color = IOSSecondaryLabel,
-                                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                                maxLines = 2
-                                            )
                                         }
                                     }
                                 }
@@ -1083,6 +1552,7 @@ fun SettingsTab(
         IOSSectionHeader("SEMANTIC PIPELINE")
         IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
             var verificationEnabled by remember { mutableStateOf(secureStorage.getVerificationEnabled()) }
+            var sendScreenshotsToLlm by remember { mutableStateOf(secureStorage.getSendScreenshotsToLlm()) }
 
             IOSSettingsRow(
                 icon = Icons.Default.Verified,
@@ -1103,7 +1573,35 @@ fun SettingsTab(
                     )
                 }
             )
+
+            Divider(color = IOSSeparator, modifier = Modifier.padding(start = 58.dp))
+
+            IOSSettingsRow(
+                icon = Icons.Default.PhotoCamera,
+                iconBackground = IOSOrange,
+                title = "Send Screenshots to LLMs",
+                subtitle = if (sendScreenshotsToLlm) "Visual + structured context" else "Structured data only",
+                trailing = {
+                    Switch(
+                        checked = sendScreenshotsToLlm,
+                        onCheckedChange = {
+                            sendScreenshotsToLlm = it
+                            secureStorage.setSendScreenshotsToLlm(it)
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = IOSGreen
+                        )
+                    )
+                }
+            )
         }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // ── Developer Tools Section ──
+        IOSSectionHeader("DEVELOPER TOOLS")
+        DebugTapTool(modifier = Modifier.padding(horizontal = 16.dp))
 
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -1238,7 +1736,7 @@ fun SettingsTab(
             }
         }
         Text(
-            "OCR enriches the element map for WebViews, games, and custom-rendered UIs.",
+            "Adds text recognition for WebViews, games, and custom UIs where the accessibility tree is empty. Adds latency (~1-2s per step) and requires a separate API key. Not needed for most native apps.",
             fontSize = 13.sp,
             color = IOSSecondaryLabel,
             modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 6.dp),

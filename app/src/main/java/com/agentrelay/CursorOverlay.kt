@@ -20,6 +20,21 @@ class CursorOverlay(private val context: Context) {
     private var currentX = 0f
     private var currentY = 0f
 
+    /**
+     * Make the overlay invisible without removing it from the WindowManager.
+     * Used during screenshot capture so the overlay doesn't appear in screenshots.
+     */
+    fun setInvisible(invisible: Boolean) {
+        val action = Runnable {
+            cursorView?.visibility = if (invisible) View.INVISIBLE else View.VISIBLE
+        }
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            action.run()
+        } else {
+            cursorView?.post(action)
+        }
+    }
+
     fun show() {
         if (isShowing) return
 

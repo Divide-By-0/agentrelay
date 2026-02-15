@@ -3,8 +3,11 @@ package com.agentrelay
 import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.text.InputType
 import android.util.Log
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -21,167 +24,162 @@ class OverlayWindow(private val context: Context) {
     private var overlayView: View? = null
     private var isShowing = false
 
+    // iOS colors
+    private val bgColor = Color.parseColor("#F2F2F7")
+    private val cardColor = Color.WHITE
+    private val labelColor = Color.parseColor("#000000")
+    private val secondaryLabel = Color.parseColor("#3C3C43")
+    private val tertiaryLabel = Color.parseColor("#9898A0")
+    private val separatorColor = Color.parseColor("#E5E5EA")
+    private val accentBlue = Color.parseColor("#007AFF")
+    private val chipBg = Color.parseColor("#E5E5EA")
+    private val inputBg = Color.parseColor("#F2F2F7")
+    private val cancelBg = Color.parseColor("#E5E5EA")
+
+    private fun dp(value: Int): Int {
+        return TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_DIP, value.toFloat(),
+            context.resources.displayMetrics
+        ).toInt()
+    }
+
     fun show() {
         if (isShowing) return
 
-        val container = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, 0, 0, 0)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+        val container = FrameLayout(context).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
             )
         }
 
-        // Card container
+        // Main card
         val card = CardView(context).apply {
-            radius = 24f
-            cardElevation = 16f
-            setCardBackgroundColor(Color.parseColor("#2B2826"))
-            layoutParams = LinearLayout.LayoutParams(
-                800,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
+            radius = dp(14).toFloat()
+            cardElevation = dp(20).toFloat()
+            setCardBackgroundColor(cardColor)
+            layoutParams = FrameLayout.LayoutParams(dp(340), FrameLayout.LayoutParams.WRAP_CONTENT)
         }
 
         val innerLayout = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 32)
+            setPadding(dp(20), dp(20), dp(20), dp(20))
         }
 
-        // Header
-        val headerLayout = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+        // Drag handle pill
+        val handleContainer = LinearLayout(context).apply {
+            gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = 16
+            ).apply { bottomMargin = dp(12) }
+        }
+        val dragHandle = View(context).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(36), dp(5))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#D1D1D6"))
+                cornerRadius = dp(3).toFloat()
             }
         }
+        handleContainer.addView(dragHandle)
 
-        val icon = TextView(context).apply {
-            text = "🤖"
-            textSize = 24f
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                marginEnd = 12
-            }
-        }
-
+        // Title
         val title = TextView(context).apply {
             text = "What should I do?"
-            setTextColor(Color.parseColor("#E8E3E0"))
+            setTextColor(labelColor)
             textSize = 20f
-            typeface = android.graphics.Typeface.create(
-                android.graphics.Typeface.DEFAULT,
-                android.graphics.Typeface.BOLD
-            )
-        }
-
-        headerLayout.addView(icon)
-        headerLayout.addView(title)
-
-        // Continue button (if last task exists) - positioned prominently at top
-        val lastTask = TaskHistory.getLastTask(context)
-        val continueButton = Button(context).apply {
-            text = "↻ Continue: ${lastTask?.take(40) ?: ""}${if ((lastTask?.length ?: 0) > 40) "..." else ""}"
-            setTextColor(Color.parseColor("#E8E3E0"))
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = 16
+            ).apply { bottomMargin = dp(4) }
+        }
+
+        // Subtitle
+        val subtitle = TextView(context).apply {
+            text = "Describe a task for the agent"
+            setTextColor(tertiaryLabel)
+            textSize = 14f
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(16) }
+        }
+
+        // Continue button (if last task exists)
+        val lastTask = TaskHistory.getLastTask(context)
+        val continueButton = TextView(context).apply {
+            val truncated = lastTask?.take(45) ?: ""
+            val ellipsis = if ((lastTask?.length ?: 0) > 45) "..." else ""
+            text = "Continue: $truncated$ellipsis"
+            setTextColor(accentBlue)
+            textSize = 15f
+            typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(44)
+            ).apply { bottomMargin = dp(12) }
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#EBF2FF"))
+                cornerRadius = dp(10).toFloat()
             }
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(Color.parseColor("#4A4643"))
-                cornerRadius = 12f
-            }
-            setPadding(24, 16, 24, 16)
-            isAllCaps = false
-            visibility = if (lastTask != null) android.view.View.VISIBLE else android.view.View.GONE
+            setPadding(dp(16), 0, dp(16), 0)
+            visibility = if (lastTask != null) View.VISIBLE else View.GONE
             setOnClickListener {
                 lastTask?.let { task ->
                     hide()
-                    TaskHistory.addTask(context, task)
-                    CoroutineScope(Dispatchers.Main).launch {
-                        AgentOrchestrator.getInstance(context).startTask(task)
-                    }
+                    startTaskWithCaptureCheck(task)
                 }
             }
         }
 
         // Input field
         val editText = EditText(context).apply {
-            hint = "Describe the task..."
-            setHintTextColor(Color.parseColor("#808080"))
-            setTextColor(Color.parseColor("#E8E3E0"))
-            setBackgroundColor(Color.parseColor("#1A1818"))
-            setPadding(24, 24, 24, 24)
+            hint = "e.g. Open Chrome and search for cats"
+            setHintTextColor(tertiaryLabel)
+            setTextColor(labelColor)
+            textSize = 16f
+            setPadding(dp(16), dp(14), dp(16), dp(14))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = 16
-            }
-            minLines = 3
-            maxLines = 6
+            ).apply { bottomMargin = dp(12) }
+            minLines = 2
+            maxLines = 5
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(Color.parseColor("#1A1818"))
-                cornerRadius = 12f
+            background = GradientDrawable().apply {
+                setColor(inputBg)
+                cornerRadius = dp(10).toFloat()
             }
         }
 
-        // Example text
-        val exampleText = TextView(context).apply {
-            text = "Examples: \"Open Chrome and search for cats\" • \"Send a text message to John\""
-            setTextColor(Color.parseColor("#999999"))
-            textSize = 11f
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = 12
-            }
-        }
-
-        // Recent tasks carousel
+        // Recent tasks
         val recentTasks = TaskHistory.getTasks(context)
-
-        val recentTasksLayout = LinearLayout(context).apply {
+        val recentLayout = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = 16
-            }
-            visibility = if (recentTasks.isNotEmpty()) android.view.View.VISIBLE else android.view.View.GONE
+            ).apply { bottomMargin = dp(16) }
+            visibility = if (recentTasks.isNotEmpty()) View.VISIBLE else View.GONE
         }
 
         if (recentTasks.isNotEmpty()) {
             val recentLabel = TextView(context).apply {
-                text = "Recent"
-                setTextColor(Color.parseColor("#999999"))
-                textSize = 10f
-                typeface = android.graphics.Typeface.create(
-                    android.graphics.Typeface.DEFAULT,
-                    android.graphics.Typeface.BOLD
-                )
+                text = "RECENTS"
+                setTextColor(tertiaryLabel)
+                textSize = 12f
+                typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+                letterSpacing = 0.05f
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    bottomMargin = 8
-                }
+                ).apply { bottomMargin = dp(8) }
             }
-            recentTasksLayout.addView(recentLabel)
+            recentLayout.addView(recentLabel)
 
-            val scrollView = android.widget.HorizontalScrollView(context).apply {
+            val scrollView = HorizontalScrollView(context).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
@@ -189,44 +187,37 @@ class OverlayWindow(private val context: Context) {
                 isHorizontalScrollBarEnabled = false
             }
 
-            val chipContainer = LinearLayout(context).apply {
+            val chipRow = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                )
             }
 
             recentTasks.take(5).forEach { task ->
-                val chip = Button(context).apply {
-                    text = task.take(30) + if (task.length > 30) "..." else ""
-                    setTextColor(Color.parseColor("#E8E3E0"))
-                    textSize = 12f
+                val chip = TextView(context).apply {
+                    text = task.take(25) + if (task.length > 25) "..." else ""
+                    setTextColor(labelColor)
+                    textSize = 13f
                     layoutParams = LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.WRAP_CONTENT,
                         LinearLayout.LayoutParams.WRAP_CONTENT
-                    ).apply {
-                        marginEnd = 8
+                    ).apply { marginEnd = dp(8) }
+                    background = GradientDrawable().apply {
+                        setColor(chipBg)
+                        cornerRadius = dp(16).toFloat()
                     }
-                    background = android.graphics.drawable.GradientDrawable().apply {
-                        setColor(Color.parseColor("#2B2826"))
-                        cornerRadius = 20f
-                    }
-                    setPadding(24, 12, 24, 12)
-                    isAllCaps = false
+                    setPadding(dp(14), dp(8), dp(14), dp(8))
                     setOnClickListener {
                         editText.setText(task)
                         editText.setSelection(task.length)
                     }
                 }
-                chipContainer.addView(chip)
+                chipRow.addView(chip)
             }
 
-            scrollView.addView(chipContainer)
-            recentTasksLayout.addView(scrollView)
+            scrollView.addView(chipRow)
+            recentLayout.addView(scrollView)
         }
 
-        // Buttons
+        // Buttons row
         val buttonLayout = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = LinearLayout.LayoutParams(
@@ -235,56 +226,39 @@ class OverlayWindow(private val context: Context) {
             )
         }
 
-        val cancelButton = Button(context).apply {
+        val cancelButton = TextView(context).apply {
             text = "Cancel"
-            setTextColor(Color.parseColor("#E8E3E0"))
-            setBackgroundColor(Color.TRANSPARENT)
-            layoutParams = LinearLayout.LayoutParams(
-                0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                1f
-            ).apply {
-                marginEnd = 12
+            setTextColor(labelColor)
+            textSize = 17f
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(0, dp(50), 1f).apply {
+                marginEnd = dp(8)
             }
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(Color.parseColor("#3A3734"))
-                cornerRadius = 12f
+            background = GradientDrawable().apply {
+                setColor(cancelBg)
+                cornerRadius = dp(12).toFloat()
             }
-            setPadding(24, 20, 24, 20)
-            isAllCaps = false
-            setOnClickListener {
-                hide()
-            }
+            setOnClickListener { hide() }
         }
 
-        val startButton = Button(context).apply {
-            text = "Start →"
+        val startButton = TextView(context).apply {
+            text = "Start"
             setTextColor(Color.WHITE)
-            layoutParams = LinearLayout.LayoutParams(
-                0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                1f
-            ).apply {
-                marginStart = 12
+            textSize = 17f
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(0, dp(50), 1f).apply {
+                marginStart = dp(8)
             }
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(Color.parseColor("#CC9B6D"))
-                cornerRadius = 12f
+            background = GradientDrawable().apply {
+                setColor(accentBlue)
+                cornerRadius = dp(12).toFloat()
             }
-            setPadding(24, 20, 24, 20)
-            isAllCaps = false
-            typeface = android.graphics.Typeface.create(
-                android.graphics.Typeface.DEFAULT,
-                android.graphics.Typeface.BOLD
-            )
             setOnClickListener {
                 val task = editText.text.toString().trim()
                 if (task.isNotEmpty()) {
                     hide()
-                    TaskHistory.addTask(context, task)
-                    CoroutineScope(Dispatchers.Main).launch {
-                        AgentOrchestrator.getInstance(context).startTask(task)
-                    }
+                    startTaskWithCaptureCheck(task)
                 } else {
                     Toast.makeText(context, "Please enter a task", Toast.LENGTH_SHORT).show()
                 }
@@ -294,13 +268,13 @@ class OverlayWindow(private val context: Context) {
         buttonLayout.addView(cancelButton)
         buttonLayout.addView(startButton)
 
-        innerLayout.addView(headerLayout)
-        if (lastTask != null) {
-            innerLayout.addView(continueButton)
-        }
+        // Assemble
+        innerLayout.addView(handleContainer)
+        innerLayout.addView(title)
+        innerLayout.addView(subtitle)
+        if (lastTask != null) innerLayout.addView(continueButton)
         innerLayout.addView(editText)
-        innerLayout.addView(exampleText)
-        innerLayout.addView(recentTasksLayout)
+        innerLayout.addView(recentLayout)
         innerLayout.addView(buttonLayout)
 
         card.addView(innerLayout)
@@ -319,13 +293,13 @@ class OverlayWindow(private val context: Context) {
             gravity = Gravity.CENTER
         }
 
-        // Make draggable by header
+        // Make draggable by handle
         var initialX = 0
         var initialY = 0
         var initialTouchX = 0f
         var initialTouchY = 0f
 
-        headerLayout.setOnTouchListener { v, event ->
+        handleContainer.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
                     initialX = params.x
@@ -365,6 +339,24 @@ class OverlayWindow(private val context: Context) {
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to hide overlay window", e)
             }
+        }
+    }
+
+    /**
+     * Checks if screen capture is available. If not, launches the transparent
+     * ScreenCaptureRequestActivity to request permission first, then starts the task.
+     * If already available, starts the task directly.
+     */
+    private fun startTaskWithCaptureCheck(task: String) {
+        if (ScreenCaptureService.instance != null) {
+            // Screen capture already active — start directly
+            TaskHistory.addTask(context, task)
+            CoroutineScope(Dispatchers.Main).launch {
+                AgentOrchestrator.getInstance(context).startTask(task)
+            }
+        } else {
+            // Need to request screen capture permission via Activity
+            ScreenCaptureRequestActivity.launch(context, task)
         }
     }
 

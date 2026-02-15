@@ -41,7 +41,8 @@ data class ConversationItem(
         API_RESPONSE,
         ACTION_EXECUTED,
         ERROR,
-        PLANNING
+        PLANNING,
+        REASONING
     }
 }
 
@@ -50,6 +51,7 @@ object ConversationHistoryManager {
     private const val FILE_NAME = "conversation_history.json"
     private const val MAX_ITEMS = 100
     private const val MAX_PERSISTED = 50
+    private const val MAX_PERSISTED_SCREENSHOTS = 10
 
     private val history = java.util.concurrent.CopyOnWriteArrayList<ConversationItem>()
     private val listeners = java.util.concurrent.CopyOnWriteArrayList<(List<ConversationItem>) -> Unit>()
@@ -90,16 +92,48 @@ object ConversationHistoryManager {
     fun saveToDisk() {
         val ctx = appContext ?: return
         try {
-            // Persist only the last N items, stripping heavy image data to keep file small
+            val screenshotDir = File(ctx.filesDir, "screenshots")
+            screenshotDir.mkdirs()
+
+            // Find the last 10 items that have screenshots or annotated screenshots
+            val itemsWithImages = history.filter { it.screenshot != null || it.annotatedScreenshot != null }
+            val recentImageTimestamps = itemsWithImages.takeLast(MAX_PERSISTED_SCREENSHOTS).map { it.timestamp }.toSet()
+
+            // Clean up old screenshot files not in the keep set
+            screenshotDir.listFiles()?.forEach { file ->
+                val ts = file.nameWithoutExtension.removeSuffix("_annotated").toLongOrNull()
+                if (ts != null && ts !in recentImageTimestamps) {
+                    file.delete()
+                }
+            }
+
+            // Save screenshots for items we want to keep
             val toSave = history.takeLast(MAX_PERSISTED).map { item ->
-                item.copy(
-                    screenshot = null,
-                    annotatedScreenshot = null
-                )
+                val keepImage = item.timestamp in recentImageTimestamps
+                if (keepImage) {
+                    // Save screenshot to file, store filename reference
+                    item.screenshot?.let { data ->
+                        try {
+                            File(screenshotDir, "${item.timestamp}.jpg").writeText(data)
+                        } catch (_: Exception) {}
+                    }
+                    item.annotatedScreenshot?.let { data ->
+                        try {
+                            File(screenshotDir, "${item.timestamp}_annotated.jpg").writeText(data)
+                        } catch (_: Exception) {}
+                    }
+                    // Store a marker so we know to load from file
+                    item.copy(
+                        screenshot = if (item.screenshot != null) "file:${item.timestamp}.jpg" else null,
+                        annotatedScreenshot = if (item.annotatedScreenshot != null) "file:${item.timestamp}_annotated.jpg" else null
+                    )
+                } else {
+                    item.copy(screenshot = null, annotatedScreenshot = null)
+                }
             }
             val json = gson.toJson(toSave)
             File(ctx.filesDir, FILE_NAME).writeText(json)
-            Log.d(TAG, "Saved ${toSave.size} items to disk")
+            Log.d(TAG, "Saved ${toSave.size} items to disk (${recentImageTimestamps.size} with screenshots)")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save history", e)
         }
@@ -114,9 +148,32 @@ object ConversationHistoryManager {
             if (json.isBlank()) return
             val type = object : TypeToken<List<ConversationItem>>() {}.type
             val items: List<ConversationItem> = gson.fromJson(json, type)
+
+            // Restore screenshots from files
+            val screenshotDir = File(ctx.filesDir, "screenshots")
+            val restored = items.map { item ->
+                var screenshot = item.screenshot
+                var annotated = item.annotatedScreenshot
+
+                if (screenshot != null && screenshot.startsWith("file:")) {
+                    val filename = screenshot.removePrefix("file:")
+                    screenshot = try {
+                        File(screenshotDir, filename).readText()
+                    } catch (_: Exception) { null }
+                }
+                if (annotated != null && annotated.startsWith("file:")) {
+                    val filename = annotated.removePrefix("file:")
+                    annotated = try {
+                        File(screenshotDir, filename).readText()
+                    } catch (_: Exception) { null }
+                }
+
+                item.copy(screenshot = screenshot, annotatedScreenshot = annotated)
+            }
+
             history.clear()
-            history.addAll(items)
-            Log.d(TAG, "Loaded ${items.size} items from disk")
+            history.addAll(restored)
+            Log.d(TAG, "Loaded ${restored.size} items from disk")
             notifyListeners()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load history", e)

@@ -3,8 +3,11 @@ package com.agentrelay
 import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.text.InputType
 import android.util.Log
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -21,6 +24,24 @@ class TaskSuggestionOverlay(private val context: Context) {
     private var overlayView: View? = null
     private var isShowing = false
 
+    // iOS colors
+    private val cardBg = Color.WHITE
+    private val labelColor = Color.parseColor("#000000")
+    private val secondaryLabel = Color.parseColor("#6D6D72")
+    private val tertiaryLabel = Color.parseColor("#9898A0")
+    private val accentBlue = Color.parseColor("#007AFF")
+    private val warningOrange = Color.parseColor("#FF9500")
+    private val inputBg = Color.parseColor("#F2F2F7")
+    private val cancelBg = Color.parseColor("#E5E5EA")
+    private val suggestionBg = Color.parseColor("#F2F2F7")
+
+    private fun dp(value: Int): Int {
+        return TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_DIP, value.toFloat(),
+            context.resources.displayMetrics
+        ).toInt()
+    }
+
     fun show(
         originalTask: String,
         failureReason: String,
@@ -28,125 +49,120 @@ class TaskSuggestionOverlay(private val context: Context) {
     ) {
         if (isShowing) return
 
-        val container = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, 0, 0, 0)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+        val container = FrameLayout(context).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
             )
         }
 
-        // Card container
         val card = CardView(context).apply {
-            radius = 24f
-            cardElevation = 16f
-            setCardBackgroundColor(Color.parseColor("#2B2826"))
-            layoutParams = LinearLayout.LayoutParams(
-                800,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
+            radius = dp(14).toFloat()
+            cardElevation = dp(20).toFloat()
+            setCardBackgroundColor(cardBg)
+            layoutParams = FrameLayout.LayoutParams(dp(340), FrameLayout.LayoutParams.WRAP_CONTENT)
         }
 
         val innerLayout = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 32)
+            setPadding(dp(20), dp(20), dp(20), dp(20))
         }
 
-        // Header
-        val headerLayout = LinearLayout(context).apply {
+        // Drag handle
+        val handleContainer = LinearLayout(context).apply {
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(12) }
+        }
+        val dragHandle = View(context).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(36), dp(5))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#D1D1D6"))
+                cornerRadius = dp(3).toFloat()
+            }
+        }
+        handleContainer.addView(dragHandle)
+
+        // Warning icon + title
+        val headerRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = 16
-            }
+            ).apply { bottomMargin = dp(4) }
         }
 
-        val icon = TextView(context).apply {
-            text = "⚠️"
-            textSize = 24f
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                marginEnd = 12
+        val warningDot = View(context).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(10), dp(10)).apply {
+                marginEnd = dp(8)
+            }
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(warningOrange)
             }
         }
 
         val title = TextView(context).apply {
             text = "Task Failed"
-            setTextColor(Color.parseColor("#E8E3E0"))
+            setTextColor(labelColor)
             textSize = 20f
-            typeface = android.graphics.Typeface.create(
-                android.graphics.Typeface.DEFAULT,
-                android.graphics.Typeface.BOLD
-            )
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
         }
 
-        headerLayout.addView(icon)
-        headerLayout.addView(title)
+        headerRow.addView(warningDot)
+        headerRow.addView(title)
 
         // Failure reason
         val reasonText = TextView(context).apply {
             text = failureReason
-            setTextColor(Color.parseColor("#E8E3E0"))
+            setTextColor(secondaryLabel)
             textSize = 14f
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = 16
-            }
+            ).apply { bottomMargin = dp(16) }
         }
 
-        // Suggestion section
-        val suggestionLabel = TextView(context).apply {
-            text = "Suggested modifications:"
-            setTextColor(Color.parseColor("#999999"))
-            textSize = 12f
-            typeface = android.graphics.Typeface.create(
-                android.graphics.Typeface.DEFAULT,
-                android.graphics.Typeface.BOLD
-            )
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = 8
-            }
-        }
-
-        // Generate suggestions based on failure
+        // Suggestions
         val suggestions = generateSuggestions(originalTask, failureReason)
         val suggestionContainer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = 16
-            }
+            ).apply { bottomMargin = dp(16) }
         }
 
+        val suggestionLabel = TextView(context).apply {
+            text = "SUGGESTIONS"
+            setTextColor(tertiaryLabel)
+            textSize = 12f
+            letterSpacing = 0.05f
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(8) }
+        }
+        suggestionContainer.addView(suggestionLabel)
+
         suggestions.forEach { suggestion ->
-            val suggestionButton = Button(context).apply {
+            val btn = TextView(context).apply {
                 text = suggestion
-                setTextColor(Color.parseColor("#E8E3E0"))
+                setTextColor(accentBlue)
+                textSize = 15f
+                gravity = Gravity.CENTER_VERTICAL
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    bottomMargin = 8
+                ).apply { bottomMargin = dp(8) }
+                background = GradientDrawable().apply {
+                    setColor(suggestionBg)
+                    cornerRadius = dp(10).toFloat()
                 }
-                background = android.graphics.drawable.GradientDrawable().apply {
-                    setColor(Color.parseColor("#3A3734"))
-                    cornerRadius = 8f
-                }
-                setPadding(16, 16, 16, 16)
-                isAllCaps = false
+                setPadding(dp(16), dp(12), dp(16), dp(12))
                 setOnClickListener {
                     hide()
                     TaskHistory.addTask(context, suggestion)
@@ -155,43 +171,36 @@ class TaskSuggestionOverlay(private val context: Context) {
                     }
                 }
             }
-            suggestionContainer.addView(suggestionButton)
+            suggestionContainer.addView(btn)
         }
 
-        // Custom task input
+        // Custom input
         val customLabel = TextView(context).apply {
-            text = "Or modify the task:"
-            setTextColor(Color.parseColor("#999999"))
+            text = "OR MODIFY THE TASK"
+            setTextColor(tertiaryLabel)
             textSize = 12f
-            typeface = android.graphics.Typeface.create(
-                android.graphics.Typeface.DEFAULT,
-                android.graphics.Typeface.BOLD
-            )
+            letterSpacing = 0.05f
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = 8
-            }
+            ).apply { bottomMargin = dp(8) }
         }
 
         val editText = EditText(context).apply {
             setText(originalTask)
-            setTextColor(Color.parseColor("#E8E3E0"))
-            setBackgroundColor(Color.parseColor("#1A1818"))
-            setPadding(24, 24, 24, 24)
+            setTextColor(labelColor)
+            textSize = 16f
+            setPadding(dp(16), dp(14), dp(16), dp(14))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = 16
-            }
+            ).apply { bottomMargin = dp(16) }
             minLines = 2
             maxLines = 4
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(Color.parseColor("#1A1818"))
-                cornerRadius = 12f
+            background = GradientDrawable().apply {
+                setColor(inputBg)
+                cornerRadius = dp(10).toFloat()
             }
         }
 
@@ -204,47 +213,34 @@ class TaskSuggestionOverlay(private val context: Context) {
             )
         }
 
-        val cancelButton = Button(context).apply {
+        val cancelButton = TextView(context).apply {
             text = "Cancel"
-            setTextColor(Color.parseColor("#E8E3E0"))
-            layoutParams = LinearLayout.LayoutParams(
-                0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                1f
-            ).apply {
-                marginEnd = 12
+            setTextColor(labelColor)
+            textSize = 17f
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(0, dp(50), 1f).apply {
+                marginEnd = dp(8)
             }
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(Color.parseColor("#3A3734"))
-                cornerRadius = 12f
+            background = GradientDrawable().apply {
+                setColor(cancelBg)
+                cornerRadius = dp(12).toFloat()
             }
-            setPadding(24, 20, 24, 20)
-            isAllCaps = false
-            setOnClickListener {
-                hide()
-            }
+            setOnClickListener { hide() }
         }
 
-        val retryButton = Button(context).apply {
-            text = "Retry Task →"
+        val retryButton = TextView(context).apply {
+            text = "Retry"
             setTextColor(Color.WHITE)
-            layoutParams = LinearLayout.LayoutParams(
-                0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                1f
-            ).apply {
-                marginStart = 12
+            textSize = 17f
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(0, dp(50), 1f).apply {
+                marginStart = dp(8)
             }
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(Color.parseColor("#CC9B6D"))
-                cornerRadius = 12f
+            background = GradientDrawable().apply {
+                setColor(accentBlue)
+                cornerRadius = dp(12).toFloat()
             }
-            setPadding(24, 20, 24, 20)
-            isAllCaps = false
-            typeface = android.graphics.Typeface.create(
-                android.graphics.Typeface.DEFAULT,
-                android.graphics.Typeface.BOLD
-            )
             setOnClickListener {
                 val task = editText.text.toString().trim()
                 if (task.isNotEmpty()) {
@@ -262,9 +258,10 @@ class TaskSuggestionOverlay(private val context: Context) {
         buttonLayout.addView(cancelButton)
         buttonLayout.addView(retryButton)
 
-        innerLayout.addView(headerLayout)
+        // Assemble
+        innerLayout.addView(handleContainer)
+        innerLayout.addView(headerRow)
         innerLayout.addView(reasonText)
-        innerLayout.addView(suggestionLabel)
         innerLayout.addView(suggestionContainer)
         innerLayout.addView(customLabel)
         innerLayout.addView(editText)
@@ -299,7 +296,6 @@ class TaskSuggestionOverlay(private val context: Context) {
     internal fun generateSuggestions(originalTask: String, failureReason: String): List<String> {
         val suggestions = mutableListOf<String>()
 
-        // Parse failure reason and generate context-aware suggestions
         when {
             failureReason.contains("not found", ignoreCase = true) ||
             failureReason.contains("cannot find", ignoreCase = true) -> {
@@ -324,7 +320,6 @@ class TaskSuggestionOverlay(private val context: Context) {
 
     @androidx.annotation.VisibleForTesting
     internal fun simplifyTask(task: String): String {
-        // Remove complex parts and make it simpler
         val words = task.split(" ")
         return if (words.size > 5) {
             words.take(5).joinToString(" ") + "..."
@@ -335,7 +330,6 @@ class TaskSuggestionOverlay(private val context: Context) {
 
     @androidx.annotation.VisibleForTesting
     internal fun breakIntoSteps(task: String): String {
-        // Suggest breaking into first step
         return "First step: ${task.split(",").first().trim()}"
     }
 

@@ -10,6 +10,7 @@ import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.Image
 import android.media.ImageReader
+import java.util.zip.CRC32
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -246,6 +247,39 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    /**
+     * Lightweight fingerprint of the current screen content.
+     * Uses CRC32 of sampled pixel rows — fast enough to poll at ~120ms intervals.
+     * Returns null if capture fails.
+     */
+    fun captureFingerprint(): Long? {
+        val reader = imageReader ?: return null
+        return try {
+            val image = reader.acquireLatestImage() ?: return null
+            val planes = image.planes
+            val buffer = planes[0].buffer
+            val rowStride = planes[0].rowStride
+
+            val crc = CRC32()
+            val rowBuf = ByteArray(rowStride)
+            // Sample every 40th row for speed (~50 rows on a 2000px screen)
+            val step = maxOf(40, screenHeight / 50)
+            var row = 0
+            while (row < screenHeight) {
+                buffer.position(row * rowStride)
+                val toRead = minOf(rowStride, buffer.remaining())
+                buffer.get(rowBuf, 0, toRead)
+                crc.update(rowBuf, 0, toRead)
+                row += step
+            }
+            image.close()
+            crc.value
+        } catch (e: Exception) {
+            Log.w(TAG, "captureFingerprint failed", e)
+            null
+        }
+    }
+
     private fun imageToBitmap(image: Image): Bitmap? {
         return try {
             val planes = image.planes
@@ -264,7 +298,9 @@ class ScreenCaptureService : Service() {
             if (rowPadding == 0) {
                 bitmap
             } else {
-                Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight)
+                val cropped = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight)
+                bitmap.recycle()
+                cropped
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to convert image to bitmap", e)
@@ -272,7 +308,7 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    private fun bitmapToBase64WithDimensions(bitmap: Bitmap, actualWidth: Int, actualHeight: Int): ScreenshotInfo {
+    internal fun bitmapToBase64WithDimensions(bitmap: Bitmap, actualWidth: Int, actualHeight: Int): ScreenshotInfo {
         val secureStorage = SecureStorage.getInstance(this)
         var quality = secureStorage.getScreenshotQuality()
 
@@ -320,6 +356,43 @@ class ScreenCaptureService : Service() {
             statusBarHeight = statusBarHeight,
             mediaType = mediaType
         )
+    }
+
+    /**
+     * Captures a screenshot and crops it to the specified screen region.
+     * Used for split-screen to get only one app's half.
+     */
+    suspend fun captureScreenshotCropped(region: android.graphics.Rect): ScreenshotInfo? {
+        val reader = imageReader ?: return null
+        return try {
+            val image = reader.acquireLatestImage() ?: return null
+            val fullBitmap = imageToBitmap(image)
+            image.close()
+            if (fullBitmap == null) return null
+
+            // Scale region from screen coordinates to bitmap coordinates
+            val scaleX = fullBitmap.width.toFloat() / screenWidth
+            val scaleY = fullBitmap.height.toFloat() / screenHeight
+            val cropX = (region.left * scaleX).toInt().coerceIn(0, fullBitmap.width - 1)
+            val cropY = (region.top * scaleY).toInt().coerceIn(0, fullBitmap.height - 1)
+            val cropW = (region.width() * scaleX).toInt().coerceAtMost(fullBitmap.width - cropX)
+            val cropH = (region.height() * scaleY).toInt().coerceAtMost(fullBitmap.height - cropY)
+
+            if (cropW <= 0 || cropH <= 0) {
+                fullBitmap.recycle()
+                return null
+            }
+
+            val cropped = Bitmap.createBitmap(fullBitmap, cropX, cropY, cropW, cropH)
+            fullBitmap.recycle()
+
+            val info = bitmapToBase64WithDimensions(cropped, region.width(), region.height())
+            cropped.recycle()
+            info
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to capture cropped screenshot", e)
+            null
+        }
     }
 
     private fun stopCapture() {

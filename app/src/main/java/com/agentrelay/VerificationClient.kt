@@ -119,7 +119,9 @@ class VerificationClient(
                 cleanJson = cleanJson.substring(startIdx, endIdx + 1)
             }
 
-            val json = JsonParser.parseString(cleanJson).asJsonObject
+            val reader = com.google.gson.stream.JsonReader(java.io.StringReader(cleanJson))
+            reader.isLenient = true
+            val json = JsonParser.parseReader(reader).asJsonObject
             VerificationResult(
                 safe = json.get("safe")?.asBoolean ?: false,
                 reason = json.get("reason")?.asString ?: "Unknown"

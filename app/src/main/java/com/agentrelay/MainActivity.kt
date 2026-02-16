@@ -952,12 +952,29 @@ fun ActivityRow(item: ConversationItem) {
                 Spacer(modifier = Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     val isReasoning = item.type == ConversationItem.ItemType.REASONING
-                    Text(
-                        item.status,
-                        fontSize = 15.sp,
-                        color = IOSLabel,
-                        maxLines = if (expanded) Int.MAX_VALUE else if (isReasoning) 3 else 1
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            item.status,
+                            fontSize = 15.sp,
+                            color = IOSLabel,
+                            maxLines = if (expanded) Int.MAX_VALUE else if (isReasoning) 3 else 1,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (item.latencyMs != null) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            val latencyText = if (item.latencyMs >= 1000) {
+                                "${String.format("%.1f", item.latencyMs / 1000.0)}s"
+                            } else {
+                                "${item.latencyMs}ms"
+                            }
+                            Text(
+                                latencyText,
+                                fontSize = 11.sp,
+                                color = IOSTertiaryLabel,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            )
+                        }
+                    }
                     if (isReasoning && !expanded) {
                         // Show progress assessment as subtitle
                         if (item.actionDescription != null) {
@@ -1332,7 +1349,6 @@ fun SettingsTab(
                     onSave = {
                         if (claudeKey.isEmpty() || secureStorage.isValidClaudeKey(claudeKey)) {
                             secureStorage.saveClaudeApiKey(claudeKey)
-                            secureStorage.saveApiKey(claudeKey) // legacy compat
                             Toast.makeText(context, "Claude key saved", Toast.LENGTH_SHORT).show()
                         } else {
                             Toast.makeText(context, "Invalid Claude key format", Toast.LENGTH_SHORT).show()
@@ -1398,14 +1414,13 @@ fun SettingsTab(
             val fastModelOptions = listOf(
                 "claude-haiku-4-5-20251001" to "Claude Haiku 4.5",
                 "claude-sonnet-4-5" to "Claude Sonnet 4.5",
-                "claude-opus-4-5" to "Claude Opus 4.5",
-                "claude-opus-4-6" to "Claude Opus 4.6",
-                "gpt-4o" to "GPT-4o",
+                "gpt-4.1-nano" to "GPT-4.1 Nano",
+                "gpt-4.1-mini" to "GPT-4.1 Mini",
+                "gpt-4.1" to "GPT-4.1",
                 "gpt-4o-mini" to "GPT-4o Mini",
-                "o4-mini" to "o4-mini",
-                "gemini-2.0-flash-exp" to "Gemini 2.0 Flash",
-                "gemini-2.0-flash-thinking-exp" to "Gemini 2.0 Flash Thinking",
-                "gemini-exp-1206" to "Gemini Exp 1206"
+                "gpt-4o" to "GPT-4o",
+                "gemini-2.5-pro" to "Gemini 2.5 Pro",
+                "gemini-3.0-flash" to "Gemini 3.0 Flash"
             )
 
             fastModelOptions.forEachIndexed { index, (modelId, modelName) ->
@@ -1443,10 +1458,10 @@ fun SettingsTab(
             val thinkingModelOptions = listOf(
                 "claude-opus-4-6" to "Claude Opus 4.6",
                 "claude-sonnet-4-5" to "Claude Sonnet 4.5",
-                "claude-opus-4-5" to "Claude Opus 4.5",
+                "gpt-4.1" to "GPT-4.1",
                 "gpt-4o" to "GPT-4o",
                 "o4-mini" to "o4-mini",
-                "gemini-2.0-flash-thinking-exp" to "Gemini 2.0 Flash Thinking"
+                "gemini-2.5-pro" to "Gemini 2.5 Pro"
             )
 
             thinkingModelOptions.forEachIndexed { index, (modelId, modelName) ->
@@ -1483,7 +1498,8 @@ fun SettingsTab(
             var selectedQuality by remember { mutableStateOf(secureStorage.getScreenshotQuality()) }
             val qualityOptions = listOf(
                 -1 to "Auto",
-                30 to "Low (fastest)"
+                3 to "Low (fastest, smallest)",
+                30 to "Medium"
             )
 
             qualityOptions.forEachIndexed { index, (quality, name) ->
@@ -1540,6 +1556,190 @@ fun SettingsTab(
         }
         Text(
             "Shows a small draggable circle on screen to quickly open the agent.",
+            fontSize = 13.sp,
+            color = IOSSecondaryLabel,
+            modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 6.dp),
+            lineHeight = 18.sp
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // ── Agent Behavior Section ──
+        IOSSectionHeader("AGENT BEHAVIOR")
+        IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            var blockTouchEnabled by remember { mutableStateOf(secureStorage.getBlockTouchDuringAgent()) }
+            var interventionTrackingEnabled by remember { mutableStateOf(secureStorage.getInterventionTrackingEnabled()) }
+            val coroutineScope = rememberCoroutineScope()
+            var interventionCount by remember { mutableStateOf<Int?>(null) }
+
+            // Load intervention count
+            LaunchedEffect(Unit) {
+                withContext(Dispatchers.IO) {
+                    try {
+                        val db = com.agentrelay.intervention.InterventionDatabase.getInstance(context)
+                        interventionCount = db.interventionDao().getCount()
+                    } catch (_: Exception) {}
+                }
+            }
+
+            IOSSettingsRow(
+                icon = Icons.Default.TouchApp,
+                iconBackground = IOSRed,
+                title = "Block Touch During Agent",
+                subtitle = if (blockTouchEnabled) "Prevents accidental taps" else "Disabled",
+                trailing = {
+                    Switch(
+                        checked = blockTouchEnabled,
+                        onCheckedChange = {
+                            blockTouchEnabled = it
+                            secureStorage.setBlockTouchDuringAgent(it)
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = IOSGreen
+                        )
+                    )
+                }
+            )
+
+            Divider(color = IOSSeparator, modifier = Modifier.padding(start = 58.dp))
+
+            IOSSettingsRow(
+                icon = Icons.Default.TrackChanges,
+                iconBackground = Color(0xFF5856D6),
+                title = "Track User Interventions",
+                subtitle = if (interventionTrackingEnabled) "Records manual corrections" else "Disabled",
+                trailing = {
+                    Switch(
+                        checked = interventionTrackingEnabled,
+                        onCheckedChange = {
+                            interventionTrackingEnabled = it
+                            secureStorage.setInterventionTrackingEnabled(it)
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = IOSGreen
+                        )
+                    )
+                }
+            )
+
+            Divider(color = IOSSeparator, modifier = Modifier.padding(start = 58.dp))
+
+            IOSSettingsRow(
+                icon = Icons.Default.Analytics,
+                iconBackground = IOSOrange,
+                title = "Interventions",
+                subtitle = "${interventionCount ?: 0} recorded",
+                trailing = {
+                    Text(
+                        "Export",
+                        color = IOSBlue,
+                        fontSize = 15.sp,
+                        modifier = Modifier.clickable {
+                            coroutineScope.launch {
+                                try {
+                                    val db = com.agentrelay.intervention.InterventionDatabase.getInstance(context)
+                                    val allData = withContext(Dispatchers.IO) { db.interventionDao().exportAll() }
+                                    val gson = com.google.gson.Gson()
+                                    val json = gson.toJson(allData)
+                                    // Save to Downloads
+                                    val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(
+                                        android.os.Environment.DIRECTORY_DOWNLOADS
+                                    )
+                                    val file = java.io.File(downloadsDir, "interventions_${System.currentTimeMillis()}.json")
+                                    file.writeText(json)
+                                    Toast.makeText(context, "Exported ${allData.size} interventions to Downloads", Toast.LENGTH_LONG).show()
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                    )
+                }
+            )
+        }
+        Text(
+            "Block touch prevents accidental taps during agent runs. Intervention tracking records user corrections for training data.",
+            fontSize = 13.sp,
+            color = IOSSecondaryLabel,
+            modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 6.dp),
+            lineHeight = 18.sp
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // ── Screen Recording Section ──
+        IOSSectionHeader("SCREEN RECORDING")
+        IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            var recordingEnabled by remember { mutableStateOf(secureStorage.getScreenRecordingEnabled()) }
+
+            IOSSettingsRow(
+                icon = Icons.Default.Videocam,
+                iconBackground = IOSRed,
+                title = "Record Trajectories",
+                subtitle = if (recordingEnabled) "Saves video during agent runs" else "Disabled",
+                trailing = {
+                    Switch(
+                        checked = recordingEnabled,
+                        onCheckedChange = {
+                            recordingEnabled = it
+                            secureStorage.setScreenRecordingEnabled(it)
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = IOSGreen
+                        )
+                    )
+                }
+            )
+
+            Divider(color = IOSSeparator, modifier = Modifier.padding(start = 58.dp))
+
+            IOSSettingsRow(
+                icon = Icons.Default.FolderOpen,
+                iconBackground = IOSBlue,
+                title = "Open Recordings",
+                subtitle = run {
+                    val dir = ScreenRecorder.getRecordingsDir()
+                    val count = dir.listFiles()?.count { it.extension == "mp4" } ?: 0
+                    if (count > 0) "$count recording${if (count != 1) "s" else ""}" else "No recordings yet"
+                },
+                trailing = {
+                    Icon(Icons.Default.ChevronRight, contentDescription = null, tint = IOSGray2, modifier = Modifier.size(22.dp))
+                },
+                onClick = {
+                    val dir = ScreenRecorder.getRecordingsDir()
+                    dir.mkdirs()
+                    // Open the recordings folder in the system file manager
+                    val opened = try {
+                        // Use Documents UI content URI for the folder
+                        val uri = Uri.parse("content://com.android.externalstorage.documents/document/primary:Movies%2FAgentRelay")
+                        val intent = Intent(Intent.ACTION_VIEW).apply {
+                            data = uri
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        context.startActivity(intent)
+                        true
+                    } catch (e: Exception) {
+                        false
+                    }
+                    if (!opened) {
+                        // Fallback: open video gallery
+                        try {
+                            val intent = Intent(Intent.ACTION_VIEW).apply {
+                                data = android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                            }
+                            context.startActivity(intent)
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "Recordings saved at: Movies/AgentRelay/", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            )
+        }
+        Text(
+            "Records the full screen during agent runs. Videos saved to Movies/AgentRelay/.",
             fontSize = 13.sp,
             color = IOSSecondaryLabel,
             modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 6.dp),
@@ -1742,6 +1942,19 @@ fun SettingsTab(
             modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 6.dp),
             lineHeight = 18.sp
         )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // ── Build Info Section ──
+        IOSSectionHeader("BUILD INFO")
+        IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            IOSSettingsRow(
+                icon = Icons.Default.Schedule,
+                iconBackground = IOSGray2,
+                title = "Last Deployed",
+                subtitle = BuildConfig.BUILD_TIMESTAMP
+            )
+        }
     }
 }
 

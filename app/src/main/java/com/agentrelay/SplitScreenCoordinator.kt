@@ -177,6 +177,11 @@ class SplitScreenCoordinator(private val context: Context) {
         return topInfo to bottomInfo
     }
 
+    fun getWindowForSlot(slot: SplitScreenSlot): WindowInfo? {
+        val windows = identifyWindows() ?: return null
+        return if (slot == SplitScreenSlot.TOP) windows.first else windows.second
+    }
+
     fun postFinding(slot: SplitScreenSlot, key: String, value: String) {
         sharedFindings[key] = value
         Log.d(TAG, "Finding posted by $slot: $key = $value")

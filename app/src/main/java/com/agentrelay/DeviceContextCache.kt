@@ -34,7 +34,11 @@ object DeviceContextCache {
         refreshJob = scope.launch {
             try {
                 val t0 = System.currentTimeMillis()
-                val apps = queryInstalledApps(context)
+                AppKnowledgeCache.loadDescriptions(context)
+                val apps = queryInstalledApps(context).map { app ->
+                    val desc = AppKnowledgeCache.getDescription(app.packageName)
+                    if (desc != null) app.copy(description = desc) else app
+                }
                 installedApps = apps
                 lastRefreshTime = System.currentTimeMillis()
                 val elapsed = lastRefreshTime - t0
@@ -55,7 +59,11 @@ object DeviceContextCache {
             return installedApps
         }
         return withContext(Dispatchers.IO) {
-            val apps = queryInstalledApps(context)
+            AppKnowledgeCache.loadDescriptions(context)
+            val apps = queryInstalledApps(context).map { app ->
+                val desc = AppKnowledgeCache.getDescription(app.packageName)
+                if (desc != null) app.copy(description = desc) else app
+            }
             installedApps = apps
             lastRefreshTime = System.currentTimeMillis()
             apps

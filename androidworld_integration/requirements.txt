@@ -1,0 +1,3 @@
+# AndroidWorld benchmark integration for Agent Relay
+# The android_world package is optional — standalone mode works without it.
+# To install AndroidWorld: pip install android-world

@@ -2,7 +2,7 @@
 
 ## Build & Deploy
 
-- Build command: `ANDROID_HOME=/Users/aayushgupta/Library/Android/sdk ./gradlew assembleDebug`
+- Build command: `JAVA_HOME=/opt/homebrew/Cellar/openjdk@17/17.0.18/libexec/openjdk.jdk/Contents/Home ANDROID_HOME=/Users/aayushgupta/Library/Android/sdk ./gradlew assembleDebug`
 - APK location: `app/build/outputs/apk/debug/app-debug.apk`
 - Install command: `ANDROID_HOME=/Users/aayushgupta/Library/Android/sdk adb install -r app/build/outputs/apk/debug/app-debug.apk`
 

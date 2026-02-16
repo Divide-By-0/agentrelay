@@ -33,7 +33,8 @@ data class ConversationItem(
     val chosenElementText: String? = null,
     val clickX: Int? = null,
     val clickY: Int? = null,
-    val annotatedScreenshot: String? = null
+    val annotatedScreenshot: String? = null,
+    val latencyMs: Long? = null
 ) {
     enum class ItemType {
         SCREENSHOT_CAPTURED,

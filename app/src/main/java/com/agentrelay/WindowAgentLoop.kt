@@ -17,6 +17,7 @@ class WindowAgentLoop(
 ) {
     private val conversationHistory = mutableListOf<Message>()
     private val recentActions = mutableListOf<ActionRecord>()
+    private var currentWindowInfo: WindowInfo = windowInfo
 
     private data class ActionRecord(val action: SemanticAction, val elementId: String?, val text: String?)
 
@@ -26,7 +27,7 @@ class WindowAgentLoop(
             return
         }
         val secureStorage = SecureStorage.getInstance(context)
-        val claudeClient = ClaudeAPIClient(apiKey, model) { bytes, ms ->
+        val claudeClient = LLMClientFactory.create(apiKey, model) { bytes, ms ->
             secureStorage.saveLastUploadTime(bytes, ms)
         }
         val treeExtractor = AccessibilityTreeExtractor(automationService)
@@ -34,13 +35,14 @@ class WindowAgentLoop(
         val cursorOverlay = CursorOverlay.getInstance(context)
 
         for (iteration in 1..maxIterations) {
+            refreshWindowInfo()
             if (!isActive()) break
 
             Log.d(TAG, "[$slot] Iteration $iteration/$maxIterations")
 
             // 1. Get window root
-            val windowRoot: AccessibilityNodeInfo? = try {
-                windowInfo.windowInfo.root
+            var windowRoot: AccessibilityNodeInfo? = try {
+                currentWindowInfo.windowInfo.root
             } catch (e: Exception) {
                 Log.e(TAG, "[$slot] Failed to get window root", e)
                 null
@@ -50,8 +52,9 @@ class WindowAgentLoop(
                 Log.w(TAG, "[$slot] Window root is null, window may have closed")
                 delay(500)
                 // Try once more
-                val retryRoot = try { windowInfo.windowInfo.root } catch (_: Exception) { null }
-                if (retryRoot == null) {
+                refreshWindowInfo()
+                windowRoot = try { currentWindowInfo.windowInfo.root } catch (_: Exception) { null }
+                if (windowRoot == null) {
                     Log.e(TAG, "[$slot] Window root still null, aborting loop")
                     break
                 }
@@ -61,7 +64,7 @@ class WindowAgentLoop(
             val elements = treeExtractor.extract(rootOverride = windowRoot)
 
             // 3. Generate element map using window bounds for dimensions
-            val bounds = windowInfo.bounds
+            val bounds = currentWindowInfo.bounds
             val mapGenerator = ElementMapGenerator(bounds.width(), bounds.height())
             val elementMap = mapGenerator.generate(elements)
             val elementMapText = elementMap.toTextRepresentation()
@@ -75,15 +78,15 @@ class WindowAgentLoop(
                         StatusOverlay.getInstance(context).setInvisible(true)
                     }
                     delay(80)
-                    val screenshot = captureService.captureScreenshotCropped(bounds)
+                    captureService.captureScreenshotCropped(bounds)
+                } catch (e: Exception) {
+                    Log.w(TAG, "[$slot] Screenshot capture failed", e)
+                    null
+                } finally {
                     withContext(Dispatchers.Main) {
                         CursorOverlay.getInstance(context).setInvisible(false)
                         StatusOverlay.getInstance(context).setInvisible(false)
                     }
-                    screenshot
-                } catch (e: Exception) {
-                    Log.w(TAG, "[$slot] Screenshot capture failed", e)
-                    null
                 }
             } else null
 
@@ -241,8 +244,8 @@ class WindowAgentLoop(
                     val w = elementMap.screenWidth
                     val h = elementMap.screenHeight
                     // Offset swipe coordinates to window position
-                    val offsetX = windowInfo.bounds.left
-                    val offsetY = windowInfo.bounds.top
+                    val offsetX = currentWindowInfo.bounds.left
+                    val offsetY = currentWindowInfo.bounds.top
                     val cx = offsetX + w / 2
                     val cy = offsetY + h / 2
                     val dist = h / 3
@@ -278,11 +281,24 @@ class WindowAgentLoop(
     }
 
     private fun isActive(): Boolean {
-        // Check if the window is still available
         return try {
-            windowInfo.windowInfo.root != null || true // root may be null temporarily
+            val refreshed = coordinator.getWindowForSlot(slot)
+            if (refreshed != null) {
+                currentWindowInfo = refreshed
+                true
+            } else {
+                currentWindowInfo.windowInfo.root != null
+            }
         } catch (_: Exception) {
             false
+        }
+    }
+
+    private fun refreshWindowInfo() {
+        try {
+            coordinator.getWindowForSlot(slot)?.let { currentWindowInfo = it }
+        } catch (_: Exception) {
+            // Fall back to the last known window info for this iteration.
         }
     }
 

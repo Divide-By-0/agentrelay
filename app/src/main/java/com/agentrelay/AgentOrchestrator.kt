@@ -5,6 +5,7 @@ import android.graphics.*
 import android.util.Base64
 import android.util.Log
 import android.widget.Toast
+import com.agentrelay.intervention.InterventionTracker
 import com.agentrelay.models.*
 import com.agentrelay.ocr.OCRClient
 import kotlinx.coroutines.*
@@ -22,19 +23,38 @@ private data class StepExecutionResult(
 
 private data class StepVerificationResult(
     val success: Boolean,
-    val reason: String = ""
+    val reason: String = "",
+    val diffSummary: String? = null
 )
+
+private data class CaptureResult(
+    val screenshotInfo: ScreenshotInfo?,
+    val elementMap: ElementMap,
+    val ocrElements: List<UIElement>,
+    val screenW: Int,
+    val screenH: Int,
+    val screenshotTime: Long,
+    val extractTime: Long
+)
+
+/** Signals from step execution back to the main loop */
+private enum class StepLoopSignal { CONTINUE, BREAK_REPLAN, TASK_COMPLETED }
 
 class AgentOrchestrator(private val context: Context) {
 
     private val orchestratorScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var currentJob: Job? = null
     private var isRunning = false
+    private var pendingRecoveryPlanJob: Deferred<PlanningResult?>? = null
 
     private val conversationHistory = mutableListOf<Message>()
     private var currentTask: String = ""
+    private var screenRecorder: ScreenRecorder? = null
+
+    /** Optional callback fired when a task finishes (used by benchmark harness). Auto-clears after firing. */
+    var onTaskFinished: ((status: String, iterations: Int, message: String) -> Unit)? = null
     // Track recent actions for stuck-on-same-action detection
-    private data class ActionRecord(val action: SemanticAction, val elementId: String?, val text: String?)
+    private data class ActionRecord(val action: SemanticAction, val elementId: String?, val text: String?, val description: String = "")
     private val recentActions = mutableListOf<ActionRecord>()
 
     suspend fun startTask(task: String) {
@@ -59,14 +79,68 @@ class AgentOrchestrator(private val context: Context) {
         }
 
         val captureService = ScreenCaptureService.instance
-        if (captureService == null) {
-            Log.w(TAG, "Screen capture not initialized — running in accessibility-only mode")
+        if (captureService == null || !captureService.hasActiveProjection()) {
+            Log.e(TAG, "Screen capture not active — refusing to start agent")
+            showToast("Enable screen capture before starting the agent")
+            ConversationHistoryManager.add(
+                ConversationItem(
+                    timestamp = System.currentTimeMillis(),
+                    type = ConversationItem.ItemType.ERROR,
+                    status = "Agent start blocked: screen capture not active (service=${captureService != null}, projection=${captureService?.hasActiveProjection()})"
+                )
+            )
+            return
         }
+        // Log virtual display diagnostics
+        Log.d(TAG, "Screen capture active: ${captureService.getVirtualDisplayInfo()}")
+        ConversationHistoryManager.add(
+            ConversationItem(
+                timestamp = System.currentTimeMillis(),
+                type = ConversationItem.ItemType.API_REQUEST,
+                status = "Screen capture: ${captureService.getVirtualDisplayInfo()}"
+            )
+        )
 
         currentTask = task
         conversationHistory.clear()
         recentActions.clear()
         isRunning = true
+
+        // Initialize intervention tracker
+        val tracker = InterventionTracker.getInstance(context)
+        tracker.setTaskContext(task)
+
+        // Show touch block overlay if enabled
+        if (secStore.getBlockTouchDuringAgent()) {
+            val touchBlocker = TouchBlockOverlay.getInstance(context)
+            touchBlocker.setOnStopRequested { stop() }
+            touchBlocker.show()
+        }
+
+        // Start screen recording if enabled
+        val secStore2 = SecureStorage.getInstance(context)
+        if (secStore2.getScreenRecordingEnabled() && captureService != null) {
+            val vd = captureService.getVirtualDisplay()
+            val irSurface = captureService.getImageReaderSurface()
+            if (vd != null && irSurface != null) {
+                val recorder = ScreenRecorder(
+                    context,
+                    vd,
+                    irSurface,
+                    captureService.getScreenWidth(),
+                    captureService.getScreenHeight(),
+                    captureService.getScreenDensity()
+                )
+                if (recorder.startRecording()) {
+                    screenRecorder = recorder
+                    Log.d(TAG, "Screen recording started for trajectory")
+                } else {
+                    Log.w(TAG, "Failed to start screen recording")
+                }
+            } else {
+                Log.w(TAG, "Cannot start recording: VirtualDisplay=${vd != null}, ImageReaderSurface=${irSurface != null}")
+            }
+        }
 
         // Hide floating bubble while agent is running, show status overlay
         FloatingBubble.getInstance(context).hide()
@@ -89,6 +163,8 @@ class AgentOrchestrator(private val context: Context) {
                 Log.e(TAG, "Agent loop failed", e)
                 addStatus("Error: ${e.message}")
                 showToast("Agent error: ${e.message}")
+                onTaskFinished?.invoke("error", 0, e.message ?: "Unknown error")
+                onTaskFinished = null
             } finally {
                 stop()
             }
@@ -96,9 +172,25 @@ class AgentOrchestrator(private val context: Context) {
     }
 
     fun stop() {
+        if (!isRunning && currentJob == null) return // already stopped
         isRunning = false
+
+        // Stop screen recording BEFORE cancelling the coroutine so the
+        // MediaRecorder can finalize the MP4 while everything is still alive.
+        val recordingFile = screenRecorder?.stopRecording()
+        screenRecorder = null
+        if (recordingFile != null) {
+            Log.d(TAG, "Screen recording saved: ${recordingFile.absolutePath}")
+            addStatus("Recording saved: ${recordingFile.name}")
+        }
+
         currentJob?.cancel()
         currentJob = null
+
+        // Hide touch block overlay and clear intervention tracker
+        TouchBlockOverlay.getInstance(context).hide()
+        InterventionTracker.getInstance(context).clearPlannedAction()
+
         CursorOverlay.getInstance(context).hide()
         StatusOverlay.getInstance(context).hide()
         // Restore floating bubble when agent stops
@@ -122,18 +214,42 @@ class AgentOrchestrator(private val context: Context) {
     private suspend fun captureCleanScreenshot(captureService: ScreenCaptureService?): ScreenshotInfo? {
         if (captureService == null) return null
         val t0 = System.currentTimeMillis()
-        // setInvisible now runs directly when called from main thread (no post{} deferral)
-        CursorOverlay.getInstance(context).setInvisible(true)
-        StatusOverlay.getInstance(context).setInvisible(true)
-        delay(100) // Let display compositor update
-        val t1 = System.currentTimeMillis()
-        val screenshot = captureService.captureScreenshot()
-        val t2 = System.currentTimeMillis()
-        // Restore immediately — runs synchronously on main thread
-        CursorOverlay.getInstance(context).setInvisible(false)
-        StatusOverlay.getInstance(context).setInvisible(false)
-        Log.d(TAG, "⏱ captureCleanScreenshot: hide=${t1-t0}ms capture=${t2-t1}ms total=${t2-t0}ms")
-        return screenshot
+        val recorder = screenRecorder
+        val isRecordingNow = recorder?.isRecording() == true
+        var swappedToImageReader = false
+        var t1 = t0
+        var t2 = t0
+
+        return try {
+            // setInvisible now runs directly when called from main thread (no post{} deferral)
+            CursorOverlay.getInstance(context).setInvisible(true)
+            StatusOverlay.getInstance(context).setInvisible(true)
+
+            // If recording, swap VirtualDisplay surface to ImageReader for screenshot
+            if (isRecordingNow) {
+                recorder?.swapToImageReader()
+                swappedToImageReader = true
+            }
+
+            delay(100) // Let display compositor update & deliver a frame
+            t1 = System.currentTimeMillis()
+            val screenshot = captureService.captureScreenshot()
+            t2 = System.currentTimeMillis()
+            screenshot
+        } finally {
+            if (swappedToImageReader) {
+                try {
+                    recorder?.swapToRecorder()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to swap recorder surface back after capture", e)
+                }
+            }
+
+            // Restore immediately — runs synchronously on main thread
+            CursorOverlay.getInstance(context).setInvisible(false)
+            StatusOverlay.getInstance(context).setInvisible(false)
+            Log.d(TAG, "⏱ captureCleanScreenshot: hide=${t1-t0}ms capture=${t2-t1}ms total=${t2-t0}ms")
+        }
     }
 
     private suspend fun runAgentLoop(
@@ -143,7 +259,7 @@ class AgentOrchestrator(private val context: Context) {
     ) {
         val secureStorage = SecureStorage.getInstance(context)
         val model = secureStorage.getModel()
-        val claudeClient = ClaudeAPIClient(apiKey, model) { bytes, milliseconds ->
+        val claudeClient = LLMClientFactory.create(apiKey, model) { bytes, milliseconds ->
             secureStorage.saveLastUploadTime(bytes, milliseconds)
         }
         val automationService = AutomationService.instance
@@ -178,6 +294,13 @@ class AgentOrchestrator(private val context: Context) {
         var lastResortConsulted = false
         var splitScreenAttempted = false
 
+        // Progress-based re-intervention state
+        var iterationsSinceLastComplete = 0
+        var lastProgressCheckIteration = 0
+
+        // Screen structure hash stagnation detection
+        val screenStructureHashes = mutableListOf<Pair<Int, Long>>() // (iteration, hash)
+
         // Use cached installed apps (pre-fetched on app startup via DeviceContextCache)
         val installedApps = DeviceContextCache.installedApps.ifEmpty {
             // Fallback: trigger async refresh if cache is empty (shouldn't happen normally)
@@ -186,18 +309,49 @@ class AgentOrchestrator(private val context: Context) {
             emptyList()
         }
 
+        // Generate app knowledge descriptions in background if missing
+        if (planningAgent != null && installedApps.isNotEmpty()) {
+            AppKnowledgeCache.loadDescriptions(context)
+            val missingApps = AppKnowledgeCache.getMissingApps(installedApps)
+            if (missingApps.isNotEmpty()) {
+                Log.d(TAG, "Generating app knowledge for ${missingApps.size} apps in background")
+                orchestratorScope.launch(Dispatchers.IO) {
+                    try {
+                        val descriptions = planningAgent.generateAppKnowledge(missingApps)
+                        if (descriptions.isNotEmpty()) {
+                            AppKnowledgeCache.saveDescriptions(descriptions, context)
+                            // Refresh the cache so subsequent iterations have descriptions
+                            DeviceContextCache.refreshAsync(context)
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "App knowledge generation failed", e)
+                    }
+                }
+            }
+        }
+
         // Planning runs in background — fast model starts acting immediately.
         // The planning job is launched after the first screenshot/element map are captured
         // (in iteration 1) so we don't need a duplicate screenshot capture at startup.
         var pendingPlanJob: Deferred<PlanningResult?>? = null
+        pendingRecoveryPlanJob = null
         if (planningAgent != null) {
             addStatus("Planning in background (acting proactively)...")
         }
 
+        // Fix 6: Pin original task as first conversation message so it's never trimmed
+        conversationHistory.add(Message(role = "user", content = listOf(
+            ContentBlock.TextContent(text = "TASK: $task")
+        )))
+
         while (isRunning && iteration < maxIterations) {
             iteration++
+            iterationsSinceLastComplete++
             Log.d(TAG, "Agent iteration $iteration")
             addStatus("Iteration $iteration/$maxIterations")
+
+            // Sliding window: keep conversation history bounded
+            trimConversationHistory(maxWindowSize = 12)
 
             // Check if background planning has completed
             if (pendingPlanJob != null) {
@@ -219,11 +373,40 @@ class AgentOrchestrator(private val context: Context) {
                                 status = "Planning: $approachName"
                             )
                         )
+                        // Update pinned task message with planning guidance
+                        updatePinnedTaskMessage(task, currentPlan)
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Background planning result failed", e)
                 }
                 pendingPlanJob = null
+            }
+
+            // Check if background recovery planning has completed
+            if (pendingRecoveryPlanJob != null && pendingRecoveryPlanJob!!.isCompleted) {
+                try {
+                    val recovResult = pendingRecoveryPlanJob!!.await()
+                    if (recovResult != null) {
+                        currentPlan = recovResult
+                        val approachName = recovResult.approaches.getOrNull(recovResult.recommendedIndex)?.name ?: "Recovery"
+                        addStatus("Recovery strategy ready: $approachName")
+                        ConversationHistoryManager.add(
+                            ConversationItem(
+                                timestamp = System.currentTimeMillis(),
+                                type = ConversationItem.ItemType.PLANNING,
+                                response = recovResult.toGuidanceText(),
+                                status = "Recovery plan: $approachName"
+                            )
+                        )
+                        failuresSinceLastPlan = 0
+                        lastPlanConsultIteration = iteration
+                        // Update pinned task message with new planning guidance
+                        updatePinnedTaskMessage(task, currentPlan)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Background recovery planning result failed", e)
+                }
+                pendingRecoveryPlanJob = null
             }
 
             // Split-screen dispatch: if planning recommends it and we haven't tried yet
@@ -312,82 +495,20 @@ class AgentOrchestrator(private val context: Context) {
                 delay(500)
             }
 
-            // 1. Capture screenshot (clean, no grid)
-            val iterStartTime = System.currentTimeMillis()
-            addStatus("Capturing screenshot...")
-            val screenshotInfo = captureCleanScreenshot(captureService)
-            val screenshotTime = System.currentTimeMillis() - iterStartTime
-
-            if (screenshotInfo == null) {
-                screenshotFailureCount++
-                if (screenshotFailureCount == 1) {
-                    Log.w(TAG, "Screenshot failed — running in accessibility-only mode")
-                    addStatus("No screenshot — using accessibility tree only")
-                }
-            } else {
-                screenshotFailureCount = 0
-                addStatus("Screenshot captured (${screenshotInfo.actualWidth}x${screenshotInfo.actualHeight})")
-                ConversationHistoryManager.add(
-                    ConversationItem(
-                        timestamp = System.currentTimeMillis(),
-                        type = ConversationItem.ItemType.SCREENSHOT_CAPTURED,
-                        screenshot = screenshotInfo.base64Data,
-                        screenshotWidth = screenshotInfo.actualWidth,
-                        screenshotHeight = screenshotInfo.actualHeight,
-                        status = "Screenshot: ${screenshotInfo.actualWidth}x${screenshotInfo.actualHeight}"
-                    )
-                )
-            }
-
-            // 2. Extract accessibility tree (+ OCR in parallel if enabled)
-            val extractStartTime = System.currentTimeMillis()
-            addStatus("Extracting element map...")
-            val a11yElements = treeExtractor.extract()
-
-            var ocrElements = emptyList<UIElement>()
-            if (ocrEnabled && screenshotInfo != null) {
-                try {
-                    val ocrClient = OCRClient(secureStorage)
-                    val ocrResult = withContext(Dispatchers.IO) {
-                        ocrClient.recognizeText(screenshotInfo)
-                    }
-                    ocrElements = ocrResult
-                } catch (e: Exception) {
-                    Log.w(TAG, "OCR failed, continuing with accessibility tree only", e)
-                }
-            }
-
-            // 3. Merge into ElementMap — use screenshot dimensions if available, otherwise get from WindowManager
-            val screenW = screenshotInfo?.actualWidth ?: run {
-                val wm = context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                    wm.currentWindowMetrics.bounds.width()
-                } else {
-                    val dm = android.util.DisplayMetrics()
-                    @Suppress("DEPRECATION")
-                    wm.defaultDisplay.getRealMetrics(dm)
-                    dm.widthPixels
-                }
-            }
-            val screenH = screenshotInfo?.actualHeight ?: run {
-                val wm = context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                    wm.currentWindowMetrics.bounds.height()
-                } else {
-                    val dm = android.util.DisplayMetrics()
-                    @Suppress("DEPRECATION")
-                    wm.defaultDisplay.getRealMetrics(dm)
-                    dm.heightPixels
-                }
-            }
-            val mapGenerator = ElementMapGenerator(screenW, screenH)
-            val elementMap = mapGenerator.generate(a11yElements, ocrElements)
-            val extractTime = System.currentTimeMillis() - extractStartTime
-            addStatus("Element map: ${elementMap.elements.size} elements")
-            Log.d(TAG, elementMap.toTextRepresentation())
+            // 1-3. Capture screenshot, extract accessibility tree, merge into element map
+            val capture = captureAndExtract(captureService, treeExtractor, ocrEnabled, secureStorage, screenshotFailureCount)
+            if (capture.screenshotInfo == null) screenshotFailureCount++ else screenshotFailureCount = 0
+            val screenshotInfo = capture.screenshotInfo
+            val elementMap = capture.elementMap
+            val ocrElements = capture.ocrElements
+            val screenW = capture.screenW
+            val screenH = capture.screenH
+            val screenshotTime = capture.screenshotTime
+            val extractTime = capture.extractTime
 
             // Launch planning in background using the first iteration's screenshot + element map
             val currentMapText = elementMap.toTextRepresentation()
+            val previousMapForDiff = if (iteration > 1) lastElementMapText else null
             if (iteration == 1 && planningAgent != null && pendingPlanJob == null) {
                 val planScreenshot = if (sendScreenshotsToLlm) screenshotInfo else null
                 val planMapText = currentMapText
@@ -411,23 +532,31 @@ class AgentOrchestrator(private val context: Context) {
             }
 
             // Detect stuck state via element-map diffing
-            if (currentMapText == lastElementMapText) {
+            if (previousMapForDiff != null && currentMapText == previousMapForDiff) {
                 sameMapCount++
                 if (sameMapCount == 2) {
                     // First recovery: dismiss keyboard if showing (it may cover elements)
                     if (automationService.isKeyboardShowing()) {
                         addStatus("Stuck — dismissing keyboard")
                         automationService.dismissKeyboard()
-                        failureContext.add("Element map unchanged 2x, dismissed keyboard")
+                        failureContext.add("Element map unchanged 2x, dismissed keyboard (may have been hiding buttons)")
                         waitForUiSettle(captureService, minWaitMs = 100, maxWaitMs = 600)
                         continue
                     }
                 }
-                if (sameMapCount >= 3) {
+                if (sameMapCount == 3) {
+                    // Second recovery: try scrolling down — target may be off-screen
+                    addStatus("Stuck — scrolling to reveal more content")
+                    automationService.performSwipe(540, 1600, 540, 600, 300)
+                    failureContext.add("Element map unchanged 3x, scrolled down to reveal off-screen content")
+                    waitForUiSettle(captureService, minWaitMs = 150, maxWaitMs = 800)
+                    continue
+                }
+                if (sameMapCount >= 4) {
                     addStatus("Stuck detected — trying back button")
                     automationService.performBack()
                     sameMapCount = 0
-                    failureContext.add("Element map unchanged 3x, pressed back")
+                    failureContext.add("Element map unchanged 4x, pressed back to try different path")
                     failuresSinceLastPlan++
                     waitForUiSettle(captureService, minWaitMs = 150, maxWaitMs = 1000)
                     continue
@@ -436,6 +565,84 @@ class AgentOrchestrator(private val context: Context) {
                 sameMapCount = 0
             }
             lastElementMapText = currentMapText
+
+            // Screen structure hash stagnation detection
+            val structureHash = computeScreenStructureHash(elementMap)
+            screenStructureHashes.add(Pair(iteration, structureHash))
+            if (screenStructureHashes.size > 15) screenStructureHashes.removeAt(0)
+            val recentWindow = screenStructureHashes.takeLast(10)
+            val hashOccurrences = recentWindow.count { it.second == structureHash }
+            if (hashOccurrences >= 3) {
+                val msg = "Screen structure stagnant: same layout seen $hashOccurrences times in last ${recentWindow.size} iterations"
+                Log.w(TAG, msg)
+                addStatus("Stagnation detected — same screen structure repeating")
+                failureContext.add(msg)
+                failuresSinceLastPlan++
+                ConversationHistoryManager.add(
+                    ConversationItem(
+                        timestamp = System.currentTimeMillis(),
+                        type = ConversationItem.ItemType.ERROR,
+                        status = msg
+                    )
+                )
+            }
+
+            // Progress-based planning re-intervention (every 3 iterations without COMPLETE)
+            if (iterationsSinceLastComplete >= 3 &&
+                iteration - lastProgressCheckIteration >= 3 &&
+                planningAgent != null) {
+                lastProgressCheckIteration = iteration
+                Log.d(TAG, "Running progress check at iteration $iteration (${iterationsSinceLastComplete} since last complete)")
+                val recentActionsSummary = recentActions.takeLast(5).joinToString("\n") {
+                    "  - ${it.action} on '${it.elementId ?: "N/A"}': ${it.description}"
+                }
+                try {
+                    val progressResult = checkProgressWithHaiku(
+                        claudeClient, task, currentMapText, recentActionsSummary
+                    )
+                    if (!progressResult.first) {
+                        val reason = progressResult.second
+                        Log.w(TAG, "Progress check: NOT progressing — $reason")
+                        addStatus("Not making progress: $reason")
+                        failureContext.add("Progress check (iter $iteration): $reason")
+                        failuresSinceLastPlan += 2
+                        ConversationHistoryManager.add(
+                            ConversationItem(
+                                timestamp = System.currentTimeMillis(),
+                                type = ConversationItem.ItemType.ERROR,
+                                status = "Progress stalled: $reason"
+                            )
+                        )
+                        // Launch recovery planning in background (non-blocking)
+                        if (planningAgent != null && iteration - lastPlanConsultIteration >= 3
+                            && pendingRecoveryPlanJob == null) {
+                            addStatus("Launching recovery planning in background...")
+                            val recovMapText = currentMapText
+                            val recovFailureCtx = failureContext.toList()
+                            val recovCurrentPlan = currentPlan
+                            val recovApps = installedApps
+                            pendingRecoveryPlanJob = orchestratorScope.async(Dispatchers.IO) {
+                                try {
+                                    val recovScreenshot = if (sendScreenshotsToLlm) {
+                                        withContext(Dispatchers.Main) { captureCleanScreenshot(captureService) }
+                                    } else null
+                                    planningAgent.planRecovery(
+                                        task, recovScreenshot, recovMapText,
+                                        recovFailureCtx, recovCurrentPlan, recovApps
+                                    )
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "Background recovery planning failed", e)
+                                    null
+                                }
+                            }
+                        }
+                    } else {
+                        Log.d(TAG, "Progress check: progressing — ${progressResult.second}")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Progress check failed", e)
+                }
+            }
 
             // 4. Gather device context
             val deviceContext = try {
@@ -476,7 +683,8 @@ class AgentOrchestrator(private val context: Context) {
                     elementMap,
                     enhancedTask,
                     conversationHistory,
-                    deviceContext
+                    deviceContext,
+                    previousElementMapText = previousMapForDiff
                 )
             }
 
@@ -510,7 +718,8 @@ class AgentOrchestrator(private val context: Context) {
                     elementMapText = currentMapText,
                     screenshot = screenshotInfo?.base64Data,
                     screenshotWidth = screenshotInfo?.actualWidth ?: screenW,
-                    screenshotHeight = screenshotInfo?.actualHeight ?: screenH
+                    screenshotHeight = screenshotInfo?.actualHeight ?: screenH,
+                    latencyMs = apiTime
                 )
             )
 
@@ -549,379 +758,25 @@ class AgentOrchestrator(private val context: Context) {
                 )
             )
 
-            // 5. Execute each step — make overlay pass-through so taps hit the real UI
-            StatusOverlay.getInstance(context).setPassThrough(true)
-            var taskCompleted = false
-            // Track target app from open_app actions
-            val targetAppPackage = plan.steps
-                .firstOrNull { it.action == SemanticAction.OPEN_APP }
-                ?.packageName
+            // 5. Execute each step in the plan
+            val stepSignal = executeStepPlan(
+                plan, task, elementMap, currentMapText, screenshotInfo, screenW, screenH,
+                ocrElements, automationService, cursorOverlay, claudeClient, treeExtractor,
+                captureService, sendScreenshotsToLlm, verificationEnabled,
+                failureContext, planningAgent, currentPlan, installedApps,
+                iteration, lastPlanConsultIteration, failuresSinceLastPlan
+            )
+            // Update mutable state from step execution
+            if (stepSignal.updatedPlan != null) currentPlan = stepSignal.updatedPlan
+            if (stepSignal.updatedLastPlanIteration >= 0) lastPlanConsultIteration = stepSignal.updatedLastPlanIteration
+            failuresSinceLastPlan = stepSignal.updatedFailuresSinceLastPlan
+            if (stepSignal.updatedMapText != null) lastElementMapText = stepSignal.updatedMapText!!
+            var taskCompleted = stepSignal.signal == StepLoopSignal.TASK_COMPLETED
 
-            // Track previous step for parallel verification
-            var prevStep: SemanticStep? = null
-            var prevStepVerificationJob: Deferred<StepVerificationResult>? = null
-
-            for ((stepIdx, step) in plan.steps.withIndex()) {
-                if (!isRunning) break
-
-                // Never act inside agentrelay itself — go home and re-plan
-                val stepPkg = automationService.getCurrentAppPackage()
-                if (stepPkg == "com.agentrelay" &&
-                    step.action != SemanticAction.OPEN_APP &&
-                    step.action != SemanticAction.HOME) {
-                    Log.w(TAG, "Detected agentrelay as foreground — escaping")
-                    addStatus("In AgentRelay — navigating away")
-                    automationService.performHome()
-                    delay(500)
-                    break // Re-plan with the correct screen
-                }
-
-                // App verification: before non-navigation steps, check we're in the right app
-                if (targetAppPackage != null &&
-                    step.action != SemanticAction.OPEN_APP &&
-                    step.action != SemanticAction.HOME &&
-                    step.action != SemanticAction.BACK &&
-                    step.action != SemanticAction.WAIT &&
-                    step.action != SemanticAction.COMPLETE) {
-
-                    val currentPkg = automationService.getCurrentAppPackage()
-                    if (currentPkg != null && currentPkg != targetAppPackage &&
-                        currentPkg != "com.agentrelay") {
-                        addStatus("Wrong app ($currentPkg), returning to target...")
-                        automationService.performOpenApp(targetAppPackage)
-                        delay(1500)
-                        // Re-check
-                        val afterPkg = automationService.getCurrentAppPackage()
-                        if (afterPkg != targetAppPackage) {
-                            failureContext.add("Couldn't return to target app $targetAppPackage (currently in $afterPkg)")
-                            conversationHistory.add(
-                                Message(
-                                    role = "user",
-                                    content = listOf(ContentBlock.TextContent(
-                                        text = "The app switched away from the target ($targetAppPackage) to $afterPkg. " +
-                                            "Re-analyze the screen and navigate back to the correct app."
-                                    ))
-                                )
-                            )
-                            break // Re-plan
-                        }
-                    }
-                }
-
-                // Check for complete action
-                if (step.action == SemanticAction.COMPLETE) {
-                    val msg = step.description.ifBlank { "Task completed" }
-                    if (msg.startsWith("Cannot complete", ignoreCase = true) ||
-                        msg.startsWith("Failed", ignoreCase = true)) {
-                        addStatus("Task failed: $msg")
-                        showTaskSuggestionDialog(msg, conversationHistory)
-                        taskCompleted = true
-                        break
-                    }
-
-                    // Verify completion: take a fresh screenshot and ask the model
-                    addStatus("Verifying task completion...")
-                    delay(200)
-                    val verifyScreenshot = captureCleanScreenshot(captureService)
-
-                    if (verifyScreenshot != null) {
-                        val verified = verifyTaskCompletion(
-                            claudeClient,
-                            task,
-                            if (sendScreenshotsToLlm) verifyScreenshot else null,
-                            treeExtractor,
-                            conversationHistory
-                        )
-                        if (verified) {
-                            addStatus("Task completed: $msg")
-                            showToast("Task completed: $msg")
-                            taskCompleted = true
-                        } else {
-                            addStatus("Task not actually done — continuing")
-                            failureContext.add("Agent claimed complete but verification failed: $msg")
-                            conversationHistory.add(
-                                Message(
-                                    role = "user",
-                                    content = listOf(ContentBlock.TextContent(
-                                        text = "You said the task is complete ('$msg') but the task is NOT done yet. " +
-                                            "The original task is: $task\n" +
-                                            "Look at the current screen and continue working. Do NOT say complete until EVERY part of the task is finished."
-                                    ))
-                                )
-                            )
-                        }
-                    } else {
-                        // Can't verify, trust the agent
-                        addStatus("Task completed: $msg")
-                        showToast("Task completed: $msg")
-                        taskCompleted = true
-                    }
-                    break
-                }
-
-                addStatus("Step ${stepIdx + 1}/${plan.steps.size}: ${step.description}")
-
-                // Check parallel verification of previous step
-                if (prevStepVerificationJob != null) {
-                    try {
-                        val verResult = prevStepVerificationJob!!.await()
-                        if (!verResult.success) {
-                            addStatus("Previous step failed verification: ${verResult.reason}")
-                            Log.w(TAG, "Previous step '${prevStep?.description}' failed verification: ${verResult.reason}")
-                            failureContext.add("Step '${prevStep?.description}' did not take effect: ${verResult.reason}")
-                            conversationHistory.add(
-                                Message(
-                                    role = "user",
-                                    content = listOf(ContentBlock.TextContent(
-                                        text = "WARNING: The previous step '${prevStep?.description}' did NOT work as expected. " +
-                                            "Reason: ${verResult.reason}. " +
-                                            "Re-analyze the current screen. You may need to retry that step or take a different approach."
-                                    ))
-                                )
-                            )
-                            break // Re-plan since previous step failed
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Previous step verification threw exception", e)
-                    }
-                    prevStepVerificationJob = null
-                }
-
-                // 6. Verify before execution (if enabled and it's a click/type)
-                if (verificationEnabled && step.element != null &&
-                    (step.action == SemanticAction.CLICK || step.action == SemanticAction.TYPE)) {
-                    val verifier = VerificationClient(automationService, claudeClient, secureStorage)
-                    val verifyResult = verifier.verify(elementMap, plan, step)
-                    if (!verifyResult.safe) {
-                        addStatus("Verification failed: ${verifyResult.reason}")
-                        failureContext.add("Verification: ${verifyResult.reason}")
-                        conversationHistory.add(
-                            Message(
-                                role = "user",
-                                content = listOf(ContentBlock.TextContent(
-                                    text = "Verification failed: ${verifyResult.reason}. The UI changed. Re-analyze."
-                                ))
-                            )
-                        )
-                        break // Re-plan with updated screen
-                    }
-                }
-
-                // Resolve element ID to screen coordinates
-                val result = executeSemanticStep(step, elementMap, automationService, cursorOverlay)
-
-                if (!result.success) {
-                    val reason = result.failureReason ?: "Unknown failure"
-                    val detailedStatus = "Step failed: ${step.action} '${step.element ?: ""}' — $reason"
-                    addStatus(detailedStatus)
-                    Log.w(TAG, detailedStatus)
-
-                    ConversationHistoryManager.add(
-                        ConversationItem(
-                            timestamp = System.currentTimeMillis(),
-                            type = ConversationItem.ItemType.ERROR,
-                            action = "${step.action} ${step.element ?: ""}",
-                            actionDescription = step.description,
-                            status = detailedStatus,
-                            elementMapText = currentMapText,
-                            chosenElementId = step.element,
-                            screenshot = screenshotInfo?.base64Data,
-                            screenshotWidth = screenshotInfo?.actualWidth ?: screenW,
-                            screenshotHeight = screenshotInfo?.actualHeight ?: screenH
-                        )
-                    )
-
-                    // Retry once: re-extract the element map (UI may have changed)
-                    addStatus("Retrying with fresh element map...")
-                    waitForUiSettle(captureService, minWaitMs = 80, maxWaitMs = 400)
-                    val retryTree = treeExtractor.extract()
-                    val retryMapGen = ElementMapGenerator(
-                        screenshotInfo?.actualWidth ?: screenW, screenshotInfo?.actualHeight ?: screenH
-                    )
-                    val retryMap = retryMapGen.generate(retryTree, ocrElements)
-                    val retryMapText = retryMap.toTextRepresentation()
-
-                    val retryResult = executeSemanticStep(step, retryMap, automationService, cursorOverlay)
-                    if (retryResult.success) {
-                        addStatus("Retry succeeded: ${step.description}")
-                        // Build annotated screenshot for the retry
-                        val retryAnnotated = if (retryResult.clickX != null && retryResult.clickY != null) {
-                            createAnnotatedScreenshot(
-                                screenshotInfo, retryResult.clickX, retryResult.clickY,
-                                retryResult.chosenElementId, retryMap
-                            )
-                        } else null
-
-                        ConversationHistoryManager.add(
-                            ConversationItem(
-                                timestamp = System.currentTimeMillis(),
-                                type = ConversationItem.ItemType.ACTION_EXECUTED,
-                                action = "${step.action} ${step.element ?: ""} (retry)",
-                                actionDescription = "${step.description} (retry succeeded)",
-                                status = "Retry succeeded: ${step.description}",
-                                elementMapText = retryMapText,
-                                chosenElementId = retryResult.chosenElementId,
-                                chosenElementText = retryResult.chosenElementText,
-                                clickX = retryResult.clickX,
-                                clickY = retryResult.clickY,
-                                annotatedScreenshot = retryAnnotated,
-                                screenshot = screenshotInfo?.base64Data,
-                                screenshotWidth = screenshotInfo?.actualWidth ?: screenW,
-                                screenshotHeight = screenshotInfo?.actualHeight ?: screenH
-                            )
-                        )
-                        // Update map text for stuck detection
-                        lastElementMapText = retryMapText
-                        if (stepIdx < plan.steps.lastIndex) {
-                            waitForUiSettle(captureService, minWaitMs = 50, maxWaitMs = 400)
-                        }
-                        continue // Continue to next step
-                    }
-
-                    // Retry also failed — log and feed detailed info to Claude
-                    val retryReason = retryResult.failureReason ?: "Unknown"
-                    val fullFailure = "Step '${step.description}' failed twice.\n" +
-                        "First attempt: $reason\n" +
-                        "Retry: $retryReason"
-                    failureContext.add(fullFailure)
-                    failuresSinceLastPlan++
-
-                    ConversationHistoryManager.add(
-                        ConversationItem(
-                            timestamp = System.currentTimeMillis(),
-                            type = ConversationItem.ItemType.ERROR,
-                            action = "${step.action} ${step.element ?: ""} (retry failed)",
-                            actionDescription = "Retry also failed",
-                            status = "Retry failed: $retryReason",
-                            elementMapText = retryMapText,
-                            screenshot = screenshotInfo?.base64Data,
-                            screenshotWidth = screenshotInfo?.actualWidth ?: screenW,
-                            screenshotHeight = screenshotInfo?.actualHeight ?: screenH
-                        )
-                    )
-
-                    conversationHistory.add(
-                        Message(
-                            role = "user",
-                            content = listOf(ContentBlock.TextContent(
-                                text = "Step FAILED (tried twice): ${step.description}\n" +
-                                    "Reason: $reason\n" +
-                                    "Retry reason: $retryReason\n" +
-                                    "The element '${step.element}' could not be found or interacted with. " +
-                                    "Re-analyze the current screen and try a completely different approach. " +
-                                    "If unsure which element is correct, use search or scroll to find it."
-                            ))
-                        )
-                    )
-
-                    // Consult planning agent on repeated failures
-                    if (planningAgent != null && failuresSinceLastPlan >= 3 && iteration - lastPlanConsultIteration >= 3) {
-                        addStatus("Consulting planning agent for recovery...")
-                        try {
-                            val recoveryScreenshot = if (sendScreenshotsToLlm) captureCleanScreenshot(captureService) else null
-
-                            val recoveryPlan = planningAgent.planRecovery(
-                                task, recoveryScreenshot, currentMapText,
-                                failureContext, currentPlan, installedApps
-                            )
-                            if (recoveryPlan != null) {
-                                currentPlan = recoveryPlan
-                                val approachName = recoveryPlan.approaches.getOrNull(recoveryPlan.recommendedIndex)?.name ?: "Recovery"
-                                addStatus("New strategy: $approachName")
-                                ConversationHistoryManager.add(
-                                    ConversationItem(
-                                        timestamp = System.currentTimeMillis(),
-                                        type = ConversationItem.ItemType.PLANNING,
-                                        response = recoveryPlan.toGuidanceText(),
-                                        status = "Recovery plan: $approachName"
-                                    )
-                                )
-                            }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Recovery planning failed", e)
-                        }
-                        failuresSinceLastPlan = 0
-                        lastPlanConsultIteration = iteration
-                    }
-
-                    break // Re-plan
-                }
-
-                // Build annotated screenshot if we have click coordinates
-                val annotated = if (result.clickX != null && result.clickY != null) {
-                    createAnnotatedScreenshot(
-                        screenshotInfo, result.clickX, result.clickY,
-                        result.chosenElementId, elementMap
-                    )
-                } else null
-
-                // Track this action for stuck-on-same-action detection
-                recentActions.add(ActionRecord(step.action, step.element, step.text))
-                if (recentActions.size > 20) recentActions.removeAt(0)
-
-                addStatus("Step completed: ${step.description}")
-                ConversationHistoryManager.add(
-                    ConversationItem(
-                        timestamp = System.currentTimeMillis(),
-                        type = ConversationItem.ItemType.ACTION_EXECUTED,
-                        action = "${step.action} ${step.element ?: ""}",
-                        actionDescription = step.description,
-                        status = "Executed: ${step.description}",
-                        elementMapText = currentMapText,
-                        chosenElementId = result.chosenElementId,
-                        chosenElementText = result.chosenElementText,
-                        clickX = result.clickX,
-                        clickY = result.clickY,
-                        annotatedScreenshot = annotated,
-                        screenshot = screenshotInfo?.base64Data,
-                        screenshotWidth = screenshotInfo?.actualWidth ?: screenW,
-                        screenshotHeight = screenshotInfo?.actualHeight ?: screenH
-                    )
-                )
-
-                // Launch parallel verification of this step while moving to the next
-                prevStep = step
-                if (step.action == SemanticAction.TYPE || step.action == SemanticAction.CLICK) {
-                    prevStepVerificationJob = orchestratorScope.async(Dispatchers.IO) {
-                        delay(150) // Brief pause before checking
-                        verifyStepEffect(step, automationService, treeExtractor,
-                            screenshotInfo?.actualWidth ?: screenW, screenshotInfo?.actualHeight ?: screenH)
-                    }
-                } else {
-                    prevStepVerificationJob = null
-                }
-
-                // Wait for UI to settle between steps via screenshot diffing
-                if (stepIdx < plan.steps.lastIndex) {
-                    val isNavAction = step.action == SemanticAction.OPEN_APP ||
-                        step.action == SemanticAction.BACK ||
-                        step.action == SemanticAction.HOME ||
-                        step.action == SemanticAction.SWIPE
-                    if (isNavAction) {
-                        // Navigation actions may trigger animations/transitions
-                        waitForUiSettle(captureService, minWaitMs = 150, maxWaitMs = 1200, pollIntervalMs = 150)
-                    } else {
-                        // Taps/types usually settle quickly
-                        waitForUiSettle(captureService, minWaitMs = 50, maxWaitMs = 500, pollIntervalMs = 100)
-                    }
-                }
+            if (taskCompleted) {
+                iterationsSinceLastComplete = 0
+                break
             }
-
-            // Check final step verification if loop ended normally
-            if (prevStepVerificationJob != null) {
-                try {
-                    val finalCheck = prevStepVerificationJob!!.await()
-                    if (!finalCheck.success) {
-                        Log.w(TAG, "Final step verification failed: ${finalCheck.reason}")
-                        failureContext.add("Last step '${prevStep?.description}' didn't take effect: ${finalCheck.reason}")
-                    }
-                } catch (_: Exception) {}
-            }
-
-            // Restore overlay touchability after step execution
-            StatusOverlay.getInstance(context).setPassThrough(false)
-
-            if (taskCompleted) break
 
             // Wait for UI to settle before next iteration via screenshot diffing
             addStatus("Waiting for UI to settle...")
@@ -931,16 +786,638 @@ class AgentOrchestrator(private val context: Context) {
         if (iteration >= maxIterations) {
             addStatus("Maximum iterations reached")
             showToast("Maximum iterations reached")
+            onTaskFinished?.invoke("max_iterations", iteration, "Maximum iterations reached")
+            onTaskFinished = null
         }
     }
 
+    // ── Extracted: capture screenshot + extract accessibility tree + build element map ──
+
+    private suspend fun captureAndExtract(
+        captureService: ScreenCaptureService?,
+        treeExtractor: AccessibilityTreeExtractor,
+        ocrEnabled: Boolean,
+        secureStorage: SecureStorage,
+        screenshotFailureCount: Int
+    ): CaptureResult {
+        val iterStartTime = System.currentTimeMillis()
+        val screenshotInfo = captureCleanScreenshot(captureService)
+        val screenshotTime = System.currentTimeMillis() - iterStartTime
+
+        if (screenshotInfo == null) {
+            if (screenshotFailureCount == 0) {
+                Log.w(TAG, "Screenshot failed — running in accessibility-only mode")
+                addStatus("No screenshot — using accessibility tree only")
+            }
+        } else {
+            ConversationHistoryManager.add(
+                ConversationItem(
+                    timestamp = System.currentTimeMillis(),
+                    type = ConversationItem.ItemType.SCREENSHOT_CAPTURED,
+                    screenshot = screenshotInfo.base64Data,
+                    screenshotWidth = screenshotInfo.actualWidth,
+                    screenshotHeight = screenshotInfo.actualHeight,
+                    status = "Screenshot: ${screenshotInfo.actualWidth}x${screenshotInfo.actualHeight}",
+                    latencyMs = screenshotTime
+                )
+            )
+        }
+
+        val extractStartTime = System.currentTimeMillis()
+        // Hide overlays during tree extraction so they don't obscure underlying elements
+        StatusOverlay.getInstance(context).setInvisible(true)
+        CursorOverlay.getInstance(context).setInvisible(true)
+        val a11yElements = treeExtractor.extract()
+        // Restore overlays immediately after extraction
+        StatusOverlay.getInstance(context).setInvisible(false)
+        CursorOverlay.getInstance(context).setInvisible(false)
+
+        var ocrElements = emptyList<UIElement>()
+        if (ocrEnabled && screenshotInfo != null) {
+            try {
+                val ocrClient = OCRClient(secureStorage)
+                val ocrResult = withContext(Dispatchers.IO) {
+                    ocrClient.recognizeText(screenshotInfo)
+                }
+                ocrElements = ocrResult
+            } catch (e: Exception) {
+                Log.w(TAG, "OCR failed, continuing with accessibility tree only", e)
+            }
+        }
+
+        val screenW = screenshotInfo?.actualWidth ?: run {
+            val wm = context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                wm.currentWindowMetrics.bounds.width()
+            } else {
+                val dm = android.util.DisplayMetrics()
+                @Suppress("DEPRECATION")
+                wm.defaultDisplay.getRealMetrics(dm)
+                dm.widthPixels
+            }
+        }
+        val screenH = screenshotInfo?.actualHeight ?: run {
+            val wm = context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                wm.currentWindowMetrics.bounds.height()
+            } else {
+                val dm = android.util.DisplayMetrics()
+                @Suppress("DEPRECATION")
+                wm.defaultDisplay.getRealMetrics(dm)
+                dm.heightPixels
+            }
+        }
+        val mapGenerator = ElementMapGenerator(screenW, screenH)
+        val elementMap = mapGenerator.generate(a11yElements, ocrElements)
+        val extractTime = System.currentTimeMillis() - extractStartTime
+        addStatus("Element map: ${elementMap.elements.size} elements")
+        Log.d(TAG, elementMap.toTextRepresentation())
+
+        return CaptureResult(screenshotInfo, elementMap, ocrElements, screenW, screenH, screenshotTime, extractTime)
+    }
+
+    // ── Extracted: execute all steps in a plan ──
+
+    private data class StepPlanResult(
+        val signal: StepLoopSignal,
+        val updatedPlan: PlanningResult? = null,
+        val updatedLastPlanIteration: Int = -1,
+        val updatedFailuresSinceLastPlan: Int = 0,
+        val updatedMapText: String? = null
+    )
+
+    private suspend fun executeStepPlan(
+        plan: SemanticActionPlan,
+        task: String,
+        elementMap: ElementMap,
+        currentMapText: String,
+        screenshotInfo: ScreenshotInfo?,
+        screenW: Int, screenH: Int,
+        ocrElements: List<UIElement>,
+        automationService: AutomationService,
+        cursorOverlay: CursorOverlay,
+        claudeClient: LLMClient,
+        treeExtractor: AccessibilityTreeExtractor,
+        captureService: ScreenCaptureService?,
+        sendScreenshotsToLlm: Boolean,
+        verificationEnabled: Boolean,
+        failureContext: MutableList<String>,
+        planningAgent: PlanningAgent?,
+        currentPlan: PlanningResult?,
+        installedApps: List<AppInfo>,
+        iteration: Int,
+        lastPlanConsultIteration: Int,
+        incomingFailuresSinceLastPlan: Int
+    ): StepPlanResult {
+        StatusOverlay.getInstance(context).setPassThrough(true)
+        var updatedPlan = currentPlan
+        var updatedLastPlanIteration = lastPlanConsultIteration
+        var failuresSinceLastPlan = incomingFailuresSinceLastPlan
+        var updatedMapText: String? = null
+
+        // Mutable copies so we can refresh between steps
+        var liveElementMap = elementMap
+        var liveMapText = currentMapText
+
+        val targetAppPackage = plan.steps
+            .firstOrNull { it.action == SemanticAction.OPEN_APP }
+            ?.packageName
+
+        var prevStep: SemanticStep? = null
+        var prevStepVerificationJob: Deferred<StepVerificationResult>? = null
+        var prevStepMapText: String = liveMapText  // snapshot before each step for verification
+        var signal = StepLoopSignal.CONTINUE
+
+        for ((stepIdx, step) in plan.steps.withIndex()) {
+            if (!isRunning) break
+
+            // Never act inside agentrelay itself
+            val stepPkg = automationService.getCurrentAppPackage()
+            if (stepPkg == "com.agentrelay" &&
+                step.action != SemanticAction.OPEN_APP &&
+                step.action != SemanticAction.HOME) {
+                Log.w(TAG, "Detected agentrelay as foreground — escaping")
+                addStatus("In AgentRelay — navigating away")
+                automationService.performHome()
+                delay(500)
+                break
+            }
+
+            // App verification
+            if (targetAppPackage != null &&
+                step.action != SemanticAction.OPEN_APP &&
+                step.action != SemanticAction.HOME &&
+                step.action != SemanticAction.BACK &&
+                step.action != SemanticAction.WAIT &&
+                step.action != SemanticAction.COMPLETE) {
+
+                val currentPkg = automationService.getCurrentAppPackage()
+                if (currentPkg != null && currentPkg != targetAppPackage &&
+                    currentPkg != "com.agentrelay") {
+                    addStatus("Wrong app ($currentPkg), returning to target...")
+                    automationService.performOpenApp(targetAppPackage)
+                    delay(1500)
+                    val afterPkg = automationService.getCurrentAppPackage()
+                    if (afterPkg != targetAppPackage) {
+                        failureContext.add("Couldn't return to target app $targetAppPackage (currently in $afterPkg)")
+                        conversationHistory.add(Message(role = "user", content = listOf(
+                            ContentBlock.TextContent(
+                                text = "The app switched away from the target ($targetAppPackage) to $afterPkg. " +
+                                    "Re-analyze the screen and navigate back to the correct app."
+                            )
+                        )))
+                        break
+                    }
+                }
+            }
+
+            // Handle complete action
+            if (step.action == SemanticAction.COMPLETE) {
+                val completeResult = handleCompleteAction(step, task, claudeClient, treeExtractor,
+                    captureService, sendScreenshotsToLlm, failureContext)
+                signal = completeResult.signal
+                failuresSinceLastPlan += completeResult.failuresSinceLastPlanDelta
+                break
+            }
+
+            addStatus("Step ${stepIdx + 1}/${plan.steps.size}: ${step.description}")
+
+            // Check parallel verification of previous step
+            if (prevStepVerificationJob != null) {
+                try {
+                    val verResult = prevStepVerificationJob!!.await()
+                    if (!verResult.success) {
+                        addStatus("Previous step failed verification: ${verResult.reason}")
+                        Log.w(TAG, "Previous step '${prevStep?.description}' failed verification: ${verResult.reason}")
+                        failureContext.add("Step '${prevStep?.description}' did not take effect: ${verResult.reason}")
+                        conversationHistory.add(Message(role = "user", content = listOf(
+                            ContentBlock.TextContent(
+                                text = "WARNING: The previous step '${prevStep?.description}' did NOT work as expected. " +
+                                    "Reason: ${verResult.reason}. " +
+                                    "Re-analyze the current screen. You may need to retry that step or take a different approach."
+                            )
+                        )))
+                        break
+                    } else if (verResult.diffSummary != null) {
+                        // Feed UI change context into conversation so Claude knows what happened
+                        Log.d(TAG, "Step '${prevStep?.description}' UI changes: ${verResult.diffSummary}")
+                        conversationHistory.add(Message(role = "user", content = listOf(
+                            ContentBlock.TextContent(
+                                text = "Step '${prevStep?.description}' executed. UI changes: ${verResult.diffSummary}"
+                            )
+                        )))
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Previous step verification threw exception", e)
+                }
+                prevStepVerificationJob = null
+            }
+
+            // Pre-execution verification
+            if (verificationEnabled && step.element != null &&
+                (step.action == SemanticAction.CLICK || step.action == SemanticAction.TYPE)) {
+                val verifier = VerificationClient(automationService, claudeClient, SecureStorage.getInstance(context))
+                val verifyResult = verifier.verify(liveElementMap, plan, step)
+                if (!verifyResult.safe) {
+                    addStatus("Verification failed: ${verifyResult.reason}")
+                    failureContext.add("Verification: ${verifyResult.reason}")
+                    val directive = buildSafetyDirective(verifyResult.reason, step)
+                    conversationHistory.add(Message(role = "user", content = listOf(
+                        ContentBlock.TextContent(text = directive)
+                    )))
+                    ConversationHistoryManager.add(
+                        ConversationItem(
+                            timestamp = System.currentTimeMillis(),
+                            type = ConversationItem.ItemType.ERROR,
+                            status = "Safety: ${verifyResult.reason}",
+                            actionDescription = directive
+                        )
+                    )
+                    break
+                }
+            }
+
+            // Snapshot element map text before execution for verification comparison
+            prevStepMapText = liveMapText
+
+            // Set planned action for intervention tracking
+            val interventionTracker = InterventionTracker.getInstance(context)
+            // Build a compact element map snapshot (IDs + texts, up to 30 elements)
+            val compactSnapshot = liveElementMap.elements.take(30).joinToString(";") {
+                "${it.id}:${it.text.take(30)}"
+            }
+            interventionTracker.setPlannedAction(step, compactSnapshot)
+
+            // Update current app context for tracker
+            try {
+                val deviceCtx = automationService.getDeviceContext()
+                interventionTracker.setCurrentApp(deviceCtx.currentAppName, deviceCtx.currentAppPackage)
+            } catch (_: Exception) {}
+
+            // Execute the step
+            val stepStartTime = System.currentTimeMillis()
+            val result = executeSemanticStep(step, liveElementMap, automationService, cursorOverlay)
+            val stepLatencyMs = System.currentTimeMillis() - stepStartTime
+
+            // Clear planned action after a short buffer to catch delayed events
+            orchestratorScope.launch {
+                delay(500)
+                interventionTracker.clearPlannedAction()
+            }
+
+            if (!result.success) {
+                val retryOutcome = handleStepFailure(
+                    step, result, liveElementMap, liveMapText, screenshotInfo, screenW, screenH,
+                    ocrElements, automationService, cursorOverlay, treeExtractor, captureService,
+                    sendScreenshotsToLlm, failureContext, planningAgent, updatedPlan, installedApps,
+                    task, iteration, updatedLastPlanIteration, failuresSinceLastPlan, stepIdx, plan
+                )
+                failuresSinceLastPlan = retryOutcome.updatedFailuresSinceLastPlan
+                if (retryOutcome.updatedPlan != null) updatedPlan = retryOutcome.updatedPlan
+                if (retryOutcome.updatedLastPlanIteration >= 0) updatedLastPlanIteration = retryOutcome.updatedLastPlanIteration
+                if (retryOutcome.updatedMapText != null) updatedMapText = retryOutcome.updatedMapText
+                if (retryOutcome.shouldContinue) continue // Retry succeeded, next step
+                break // Re-plan
+            }
+
+            // Success — log and track
+            val annotated = if (result.clickX != null && result.clickY != null) {
+                createAnnotatedScreenshot(screenshotInfo, result.clickX, result.clickY, result.chosenElementId, liveElementMap)
+            } else null
+
+            recentActions.add(ActionRecord(step.action, step.element, step.text, step.description))
+            if (recentActions.size > 20) recentActions.removeAt(0)
+
+            addStatus("Step completed: ${step.description}")
+            ConversationHistoryManager.add(
+                ConversationItem(
+                    timestamp = System.currentTimeMillis(),
+                    type = ConversationItem.ItemType.ACTION_EXECUTED,
+                    action = "${step.action} ${step.element ?: ""}",
+                    actionDescription = step.description,
+                    status = "Executed: ${step.description}",
+                    elementMapText = liveMapText,
+                    chosenElementId = result.chosenElementId,
+                    chosenElementText = result.chosenElementText,
+                    clickX = result.clickX, clickY = result.clickY,
+                    annotatedScreenshot = annotated,
+                    screenshot = screenshotInfo?.base64Data,
+                    screenshotWidth = screenshotInfo?.actualWidth ?: screenW,
+                    screenshotHeight = screenshotInfo?.actualHeight ?: screenH,
+                    latencyMs = stepLatencyMs
+                )
+            )
+
+            // Launch parallel verification with pre-step snapshot
+            prevStep = step
+            val capturedPreStepMapText = prevStepMapText  // capture for async lambda
+            prevStepVerificationJob = if (step.action == SemanticAction.TYPE || step.action == SemanticAction.CLICK) {
+                orchestratorScope.async(Dispatchers.IO) {
+                    delay(150)
+                    verifyStepEffect(step, automationService, treeExtractor,
+                        screenshotInfo?.actualWidth ?: screenW, screenshotInfo?.actualHeight ?: screenH,
+                        capturedPreStepMapText)
+                }
+            } else null
+
+            // Wait for UI to settle between steps
+            if (stepIdx < plan.steps.lastIndex) {
+                val isNavAction = step.action in listOf(
+                    SemanticAction.OPEN_APP, SemanticAction.BACK, SemanticAction.HOME, SemanticAction.SWIPE
+                )
+                if (isNavAction) waitForUiSettle(captureService, minWaitMs = 150, maxWaitMs = 1200, pollIntervalMs = 150)
+                else waitForUiSettle(captureService, minWaitMs = 50, maxWaitMs = 500, pollIntervalMs = 100)
+
+                // Refresh element map after UI-changing actions so subsequent steps use fresh data
+                if (step.action in listOf(SemanticAction.CLICK, SemanticAction.TYPE, SemanticAction.SWIPE,
+                        SemanticAction.OPEN_APP, SemanticAction.BACK, SemanticAction.HOME)) {
+                    try {
+                        // Hide overlays during extraction so they don't obscure elements
+                        StatusOverlay.getInstance(context).setInvisible(true)
+                        CursorOverlay.getInstance(context).setInvisible(true)
+                        val freshElements = treeExtractor.extract()
+                        StatusOverlay.getInstance(context).setInvisible(false)
+                        CursorOverlay.getInstance(context).setInvisible(false)
+                        val freshMap = ElementMapGenerator(
+                            screenshotInfo?.actualWidth ?: screenW,
+                            screenshotInfo?.actualHeight ?: screenH
+                        ).generate(freshElements, ocrElements)
+                        liveElementMap = freshMap
+                        liveMapText = freshMap.toTextRepresentation()
+                        updatedMapText = liveMapText
+                        Log.d(TAG, "Refreshed element map between steps: ${freshMap.elements.size} elements")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to refresh element map between steps", e)
+                        // Ensure overlays are restored even on failure
+                        StatusOverlay.getInstance(context).setInvisible(false)
+                        CursorOverlay.getInstance(context).setInvisible(false)
+                    }
+                }
+            }
+        }
+
+        // Check final step verification
+        if (prevStepVerificationJob != null) {
+            try {
+                val finalCheck = prevStepVerificationJob!!.await()
+                if (!finalCheck.success) {
+                    Log.w(TAG, "Final step verification failed: ${finalCheck.reason}")
+                    failureContext.add("Last step '${prevStep?.description}' didn't take effect: ${finalCheck.reason}")
+                } else if (finalCheck.diffSummary != null) {
+                    Log.d(TAG, "Final step '${prevStep?.description}' UI changes: ${finalCheck.diffSummary}")
+                    conversationHistory.add(Message(role = "user", content = listOf(
+                        ContentBlock.TextContent(
+                            text = "Step '${prevStep?.description}' executed. UI changes: ${finalCheck.diffSummary}"
+                        )
+                    )))
+                }
+            } catch (_: Exception) {}
+        }
+
+        StatusOverlay.getInstance(context).setPassThrough(false)
+        return StepPlanResult(signal, updatedPlan, updatedLastPlanIteration, failuresSinceLastPlan, updatedMapText)
+    }
+
+    // ── Extracted: handle COMPLETE action with verification ──
+
+    private data class CompleteActionResult(
+        val signal: StepLoopSignal,
+        val failuresSinceLastPlanDelta: Int = 0  // amount to add to failuresSinceLastPlan
+    )
+
+    private suspend fun handleCompleteAction(
+        step: SemanticStep,
+        task: String,
+        claudeClient: LLMClient,
+        treeExtractor: AccessibilityTreeExtractor,
+        captureService: ScreenCaptureService?,
+        sendScreenshotsToLlm: Boolean,
+        failureContext: MutableList<String>
+    ): CompleteActionResult {
+        val msg = step.description.ifBlank { "Task completed" }
+        if (msg.startsWith("Cannot complete", ignoreCase = true) ||
+            msg.startsWith("Failed", ignoreCase = true)) {
+            addStatus("Task failed: $msg")
+            showTaskSuggestionDialog(msg, conversationHistory)
+            onTaskFinished?.invoke("failed", -1, msg)
+            onTaskFinished = null
+            return CompleteActionResult(StepLoopSignal.TASK_COMPLETED)
+        }
+
+        addStatus("Verifying task completion...")
+        delay(200)
+        val verifyScreenshot = captureCleanScreenshot(captureService)
+
+        if (verifyScreenshot != null) {
+            val (verified, reason) = verifyTaskCompletion(
+                claudeClient, task,
+                if (sendScreenshotsToLlm) verifyScreenshot else null,
+                treeExtractor, conversationHistory
+            )
+            if (verified) {
+                addStatus("Task completed: $msg")
+                showToast("Task completed: $msg")
+                onTaskFinished?.invoke("completed", -1, msg)
+                onTaskFinished = null
+                return CompleteActionResult(StepLoopSignal.TASK_COMPLETED)
+            } else {
+                // Detect "wrong task" — agent is working on something completely different
+                val reasonLower = reason.lowercase()
+                val isWrongTask = listOf("wrong", "different", "instead of", "not the", "completely", "unrelated")
+                    .any { it in reasonLower }
+
+                val failureDelta = if (isWrongTask) 3 else 1  // fast-track re-plan if on wrong task
+
+                addStatus(if (isWrongTask) "Wrong task detected — forcing re-plan" else "Task not actually done — continuing")
+                failureContext.add("Agent claimed complete but verification failed: $msg. Reason: $reason")
+                conversationHistory.add(Message(role = "user", content = listOf(
+                    ContentBlock.TextContent(
+                        text = "You said the task is complete ('$msg') but the task is NOT done yet. " +
+                            "Verification says: $reason\n" +
+                            "The original task is: $task\n" +
+                            "Look at the current screen and continue working. Do NOT say complete until EVERY part of the task is finished."
+                    )
+                )))
+                return CompleteActionResult(StepLoopSignal.CONTINUE, failuresSinceLastPlanDelta = failureDelta)
+            }
+        } else {
+            addStatus("Task completed: $msg")
+            showToast("Task completed: $msg")
+            onTaskFinished?.invoke("completed", -1, msg)
+            onTaskFinished = null
+            return CompleteActionResult(StepLoopSignal.TASK_COMPLETED)
+        }
+    }
+
+    // ── Extracted: handle step failure with retry + recovery planning ──
+
+    private data class StepFailureResult(
+        val shouldContinue: Boolean,
+        val updatedPlan: PlanningResult? = null,
+        val updatedLastPlanIteration: Int = -1,
+        val updatedFailuresSinceLastPlan: Int = 0,
+        val updatedMapText: String? = null
+    )
+
+    private suspend fun handleStepFailure(
+        step: SemanticStep,
+        result: StepExecutionResult,
+        elementMap: ElementMap,
+        currentMapText: String,
+        screenshotInfo: ScreenshotInfo?,
+        screenW: Int, screenH: Int,
+        ocrElements: List<UIElement>,
+        automationService: AutomationService,
+        cursorOverlay: CursorOverlay,
+        treeExtractor: AccessibilityTreeExtractor,
+        captureService: ScreenCaptureService?,
+        sendScreenshotsToLlm: Boolean,
+        failureContext: MutableList<String>,
+        planningAgent: PlanningAgent?,
+        currentPlan: PlanningResult?,
+        installedApps: List<AppInfo>,
+        task: String,
+        iteration: Int,
+        lastPlanConsultIteration: Int,
+        incomingFailuresSinceLastPlan: Int,
+        stepIdx: Int,
+        plan: SemanticActionPlan
+    ): StepFailureResult {
+        val reason = result.failureReason ?: "Unknown failure"
+        val detailedStatus = "Step failed: ${step.action} '${step.element ?: ""}' — $reason"
+        addStatus(detailedStatus)
+        Log.w(TAG, detailedStatus)
+
+        ConversationHistoryManager.add(
+            ConversationItem(
+                timestamp = System.currentTimeMillis(),
+                type = ConversationItem.ItemType.ERROR,
+                action = "${step.action} ${step.element ?: ""}",
+                actionDescription = step.description,
+                status = detailedStatus,
+                elementMapText = currentMapText,
+                chosenElementId = step.element,
+                screenshot = screenshotInfo?.base64Data,
+                screenshotWidth = screenshotInfo?.actualWidth ?: screenW,
+                screenshotHeight = screenshotInfo?.actualHeight ?: screenH
+            )
+        )
+
+        // Retry once with fresh element map
+        addStatus("Retrying with fresh element map...")
+        waitForUiSettle(captureService, minWaitMs = 80, maxWaitMs = 400)
+        val retryTree = treeExtractor.extract()
+        val retryMap = ElementMapGenerator(
+            screenshotInfo?.actualWidth ?: screenW, screenshotInfo?.actualHeight ?: screenH
+        ).generate(retryTree, ocrElements)
+        val retryMapText = retryMap.toTextRepresentation()
+
+        val retryResult = executeSemanticStep(step, retryMap, automationService, cursorOverlay)
+        if (retryResult.success) {
+            addStatus("Retry succeeded: ${step.description}")
+            val retryAnnotated = if (retryResult.clickX != null && retryResult.clickY != null) {
+                createAnnotatedScreenshot(screenshotInfo, retryResult.clickX, retryResult.clickY, retryResult.chosenElementId, retryMap)
+            } else null
+
+            ConversationHistoryManager.add(
+                ConversationItem(
+                    timestamp = System.currentTimeMillis(),
+                    type = ConversationItem.ItemType.ACTION_EXECUTED,
+                    action = "${step.action} ${step.element ?: ""} (retry)",
+                    actionDescription = "${step.description} (retry succeeded)",
+                    status = "Retry succeeded: ${step.description}",
+                    elementMapText = retryMapText,
+                    chosenElementId = retryResult.chosenElementId,
+                    chosenElementText = retryResult.chosenElementText,
+                    clickX = retryResult.clickX, clickY = retryResult.clickY,
+                    annotatedScreenshot = retryAnnotated,
+                    screenshot = screenshotInfo?.base64Data,
+                    screenshotWidth = screenshotInfo?.actualWidth ?: screenW,
+                    screenshotHeight = screenshotInfo?.actualHeight ?: screenH
+                )
+            )
+            if (stepIdx < plan.steps.lastIndex) {
+                waitForUiSettle(captureService, minWaitMs = 50, maxWaitMs = 400)
+            }
+            return StepFailureResult(shouldContinue = true, updatedMapText = retryMapText)
+        }
+
+        // Retry also failed
+        val retryReason = retryResult.failureReason ?: "Unknown"
+        val fullFailure = "Step '${step.description}' failed twice.\nFirst attempt: $reason\nRetry: $retryReason"
+        failureContext.add(fullFailure)
+        var failuresSinceLastPlan = incomingFailuresSinceLastPlan + 1
+        var updatedPlan: PlanningResult? = null
+        var updatedLastPlanIteration = -1
+
+        ConversationHistoryManager.add(
+            ConversationItem(
+                timestamp = System.currentTimeMillis(),
+                type = ConversationItem.ItemType.ERROR,
+                action = "${step.action} ${step.element ?: ""} (retry failed)",
+                actionDescription = "Retry also failed",
+                status = "Retry failed: $retryReason",
+                elementMapText = retryMapText,
+                screenshot = screenshotInfo?.base64Data,
+                screenshotWidth = screenshotInfo?.actualWidth ?: screenW,
+                screenshotHeight = screenshotInfo?.actualHeight ?: screenH
+            )
+        )
+
+        conversationHistory.add(Message(role = "user", content = listOf(
+            ContentBlock.TextContent(
+                text = "Step FAILED (tried twice): ${step.description}\n" +
+                    "Reason: $reason\nRetry reason: $retryReason\n" +
+                    "The element '${step.element}' could not be found or interacted with. " +
+                    "Re-analyze the current screen and try a completely different approach. " +
+                    "If unsure which element is correct, use search or scroll to find it."
+            )
+        )))
+
+        // Launch recovery planning in background (non-blocking) on repeated failures
+        if (planningAgent != null && failuresSinceLastPlan >= 3 && iteration - lastPlanConsultIteration >= 3
+            && pendingRecoveryPlanJob == null) {
+            addStatus("Launching recovery planning in background...")
+            val recovMapText = currentMapText
+            val recovFailureCtx = failureContext.toList()
+            val recovCurrentPlan = currentPlan
+            val recovApps = installedApps
+            pendingRecoveryPlanJob = orchestratorScope.async(Dispatchers.IO) {
+                try {
+                    val recoveryScreenshot = if (sendScreenshotsToLlm) {
+                        withContext(Dispatchers.Main) { captureCleanScreenshot(captureService) }
+                    } else null
+                    planningAgent.planRecovery(
+                        task, recoveryScreenshot, recovMapText,
+                        recovFailureCtx, recovCurrentPlan, recovApps
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "Background recovery planning failed", e)
+                    null
+                }
+            }
+            failuresSinceLastPlan = 0
+            updatedLastPlanIteration = iteration
+        }
+
+        return StepFailureResult(
+            shouldContinue = false,
+            updatedPlan = updatedPlan,
+            updatedLastPlanIteration = updatedLastPlanIteration,
+            updatedFailuresSinceLastPlan = failuresSinceLastPlan
+        )
+    }
+
+    /**
+     * Returns Pair(completed, reason). Reason is always populated when completed=false.
+     */
     private suspend fun verifyTaskCompletion(
-        claudeClient: ClaudeAPIClient,
+        claudeClient: LLMClient,
         originalTask: String,
         screenshotInfo: ScreenshotInfo?,
         treeExtractor: AccessibilityTreeExtractor,
         conversationHistory: List<Message>
-    ): Boolean {
+    ): Pair<Boolean, String> {
         return try {
             val elements = treeExtractor.extract()
             val wm = context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
@@ -998,7 +1475,7 @@ class AgentOrchestrator(private val context: Context) {
             val messages = listOf(Message(role = "user", content = contentBlocks))
 
             val result = claudeClient.sendMessage(messages, systemPrompt)
-            val text = result.getOrNull()?.content?.firstOrNull()?.text ?: return true
+            val text = result.getOrNull()?.content?.firstOrNull()?.text ?: return Pair(true, "")
 
             var cleanJson = text.trim()
             val startIdx = cleanJson.indexOf('{')
@@ -1023,10 +1500,10 @@ class AgentOrchestrator(private val context: Context) {
                 )
             )
 
-            completed
+            Pair(completed, reason)
         } catch (e: Exception) {
             Log.e(TAG, "Completion verification failed", e)
-            false // Fail safe: keep working instead of falsely declaring completion
+            Pair(false, "Verification error: ${e.message}") // Fail safe: keep working
         }
     }
 
@@ -1301,7 +1778,8 @@ class AgentOrchestrator(private val context: Context) {
         automationService: AutomationService,
         treeExtractor: AccessibilityTreeExtractor,
         screenWidth: Int,
-        screenHeight: Int
+        screenHeight: Int,
+        preStepMapText: String
     ): StepVerificationResult {
         return try {
             when (step.action) {
@@ -1315,15 +1793,16 @@ class AgentOrchestrator(private val context: Context) {
                         val elements = treeExtractor.extract()
                         val mapGen = ElementMapGenerator(screenWidth, screenHeight)
                         val freshMap = mapGen.generate(elements)
+                        val freshText = freshMap.toTextRepresentation()
                         val targetEl = step.element?.let { freshMap.findById(it) }
                         if (targetEl != null && targetEl.text.contains(expectedText, ignoreCase = true)) {
-                            StepVerificationResult(true)
+                            StepVerificationResult(true, diffSummary = summarizeMapDiff(preStepMapText, freshText))
                         } else if (targetEl != null) {
                             StepVerificationResult(false,
                                 "Text field '${step.element}' contains '${targetEl.text.take(30)}' instead of '${expectedText.take(30)}'")
                         } else {
                             // Can't find element, UI probably changed — assume OK
-                            StepVerificationResult(true)
+                            StepVerificationResult(true, diffSummary = summarizeMapDiff(preStepMapText, freshText))
                         }
                     } else if (fieldText.contains(expectedText, ignoreCase = true)) {
                         StepVerificationResult(true)
@@ -1334,33 +1813,51 @@ class AgentOrchestrator(private val context: Context) {
                 }
 
                 SemanticAction.CLICK -> {
-                    // For clicks, verify the UI changed — re-extract tree and check
-                    // that the element map is different (something happened)
                     val elements = treeExtractor.extract()
-                    val mapGen = ElementMapGenerator(screenWidth, screenHeight)
-                    val freshMap = mapGen.generate(elements)
-                    // Check if the clicked element is still in the same state
-                    // (e.g., if we clicked a button, it might have disappeared or the screen changed)
-                    val targetEl = step.element?.let { freshMap.findById(it) }
-                    // If the element is gone, the click probably worked (navigated away)
-                    // If it's still there, that's also fine (could be a toggle, etc.)
-                    // We can't easily know the expected outcome, so just return true
-                    // The main value is catching cases where the click clearly didn't register
-                    StepVerificationResult(true)
+                    val freshMap = ElementMapGenerator(screenWidth, screenHeight).generate(elements)
+                    val freshText = freshMap.toTextRepresentation()
+
+                    if (freshText == preStepMapText) {
+                        // UI is identical — click had no visible effect
+                        StepVerificationResult(false,
+                            "Click on '${step.element}' had no visible effect — UI unchanged")
+                    } else {
+                        // UI changed — report what changed for context
+                        StepVerificationResult(true, diffSummary = summarizeMapDiff(preStepMapText, freshText))
+                    }
                 }
 
                 else -> StepVerificationResult(true)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Step verification failed", e)
-            StepVerificationResult(true) // Don't block on verification errors
+            StepVerificationResult(
+                success = false,
+                reason = "Verification inconclusive due to ${e.javaClass.simpleName}: ${e.message ?: "unknown error"}"
+            )
         }
+    }
+
+    /**
+     * Compares two element map text representations and returns a short summary of changes.
+     */
+    private fun summarizeMapDiff(before: String, after: String): String {
+        val beforeLines = before.lines().toSet()
+        val afterLines = after.lines().toSet()
+        val added = (afterLines - beforeLines).take(3).joinToString(", ") { it.take(40) }
+        val removed = (beforeLines - afterLines).take(3).joinToString(", ") { it.take(40) }
+        return buildString {
+            if (added.isNotEmpty()) append("New: $added")
+            if (removed.isNotEmpty()) { if (isNotEmpty()) append("; "); append("Gone: $removed") }
+            if (isEmpty()) append("Minor UI changes")
+        }.take(150)
     }
 
     /**
      * Analyzes recent action history for repeated same-element actions.
      * If the model keeps clicking/typing the same element 2+ times without
-     * the screen changing, tells Claude to try a different approach.
+     * the screen changing, provides specific diagnostic scenarios and
+     * creative solutions to break out of the loop.
      */
     private fun buildActionHistoryContext(): String {
         if (recentActions.size < 2) return ""
@@ -1389,17 +1886,66 @@ class AgentOrchestrator(private val context: Context) {
             repeatCount = sameElementClicks
         }
 
+        // Detect oscillating pattern (A → B → A → B) by element ID
+        val oscillatingById = recentActions.size >= 4 && run {
+            val n = recentActions.size
+            val a1 = recentActions[n - 1]
+            val a2 = recentActions[n - 2]
+            val a3 = recentActions[n - 3]
+            val a4 = recentActions[n - 4]
+            a1.elementId == a3.elementId && a2.elementId == a4.elementId && a1.elementId != a2.elementId
+        }
+
+        // Detect semantic oscillation: same description pairs cycling even with different element IDs
+        // e.g., "Open sort menu" → "Select price sort" → "Open sort menu" → "Select price sort"
+        val oscillatingByDesc = !oscillatingById && recentActions.size >= 4 && run {
+            val n = recentActions.size
+            val d1 = recentActions[n - 1].description.lowercase()
+            val d2 = recentActions[n - 2].description.lowercase()
+            val d3 = recentActions[n - 3].description.lowercase()
+            val d4 = recentActions[n - 4].description.lowercase()
+            d1.isNotEmpty() && d2.isNotEmpty() &&
+                d1 == d3 && d2 == d4 && d1 != d2
+        }
+
+        // Detect cycling action-type pattern: all clicks, no other progress, repeated 6+ times
+        val clickCycling = !oscillatingById && !oscillatingByDesc && recentActions.size >= 6 && run {
+            val lastSix = recentActions.takeLast(6)
+            lastSix.all { it.action == SemanticAction.CLICK } &&
+                lastSix.map { it.description.lowercase() }.toSet().size <= 3
+        }
+
+        val oscillating = oscillatingById || oscillatingByDesc || clickCycling
+
         val elementDesc = last.elementId ?: "unknown"
         return buildString {
-            appendLine("⚠️ ACTION HISTORY WARNING: You have performed the SAME action (${ last.action} on '$elementDesc') $repeatCount times in a row without progress.")
-            appendLine("This action is NOT working. You MUST try something DIFFERENT:")
-            appendLine("- Try a LONG PRESS instead of a regular tap (use 'long_press' action)")
-            appendLine("- Try clicking a DIFFERENT element that might serve the same purpose")
-            appendLine("- Try swiping to reveal hidden elements")
-            appendLine("- Try dismissing the keyboard if it's covering elements")
-            appendLine("- Try using the back button and approaching from a different screen")
-            appendLine("- Look for alternative UI paths (menus, search bars, overflow buttons)")
-            appendLine("DO NOT repeat the same action on '$elementDesc' again.")
+            if (oscillating) {
+                appendLine("⚠️ OSCILLATION/CYCLE DETECTED: You are repeating the same pattern of actions without making real progress.")
+                appendLine("You may be opening and closing the same menu/dropdown, or toggling the same control back and forth.")
+                appendLine("This action sequence is NOT advancing the task. You MUST try something COMPLETELY DIFFERENT.")
+            } else {
+                appendLine("⚠️ ACTION LOOP DETECTED: You have performed the SAME action (${last.action} on '$elementDesc') $repeatCount times in a row without progress.")
+            }
+            appendLine()
+            appendLine("STOP and DIAGNOSE — consider these common causes:")
+            appendLine()
+            appendLine("1. WRONG BUTTON: There may be MULTIPLE elements with similar text (e.g., two 'Submit' buttons, a header vs. an actual button). Look carefully at ALL elements in the map — you may be clicking a non-interactive label instead of the real button, or clicking a button that's part of a different section/dialog.")
+            appendLine()
+            appendLine("2. KEYBOARD BLOCKING: The soft keyboard may be covering the element you need to tap. Use 'dismiss_keyboard' first, then look for the element again — it may appear in a different position or new elements may become visible.")
+            appendLine()
+            appendLine("3. CONTENT OFF-SCREEN: The target button or field may be below the visible area. Swipe UP to scroll down and reveal more content. Many forms have submit buttons at the bottom that require scrolling. Also try swiping DOWN if you may have scrolled past it.")
+            appendLine()
+            appendLine("4. ELEMENT MISIDENTIFICATION: The element map classifies UI elements by type, but this can be wrong. A 'TEXT' element might actually be a tappable link. An 'IMAGE' might be a button. Scan ALL elements for matching text regardless of type.")
+            appendLine()
+            appendLine("5. DIALOG OR POPUP BLOCKING: A permission dialog, popup, tooltip, or banner may be covering the target. Look for 'Allow', 'Accept', 'Dismiss', 'OK', 'Got it', or 'X' buttons that need to be cleared first.")
+            appendLine()
+            appendLine("6. WRONG SCREEN STATE: You may not be on the screen you think you are. Check the current app and screen carefully — perhaps a previous action didn't take effect, or navigation went somewhere unexpected. Consider going BACK and retrying the navigation.")
+            appendLine()
+            appendLine("7. NEEDS DIFFERENT INTERACTION: Try LONG PRESS instead of tap, or try DOUBLE TAP. Some elements only respond to specific gesture types.")
+            appendLine()
+            appendLine("8. ALTERNATIVE PATH: Completely abandon this approach. Look for a different way to achieve the same goal — a menu icon (⋮), a search bar, a different tab, the app's settings, or even a different app entirely.")
+            appendLine()
+            appendLine("MANDATORY: You MUST pick one of the above diagnoses and try a DIFFERENT action. DO NOT repeat the same action on '$elementDesc'.")
         }
     }
 
@@ -1415,8 +1961,10 @@ class AgentOrchestrator(private val context: Context) {
         pollIntervalMs: Long = 120
     ) {
         delay(minWaitMs)
-        if (captureService == null) {
-            delay(maxWaitMs - minWaitMs) // No fingerprinting, just wait
+        // When recording, VirtualDisplay is pointed at MediaRecorder — ImageReader
+        // won't receive frames, so fingerprinting would always time out. Just wait.
+        if (captureService == null || screenRecorder?.isRecording() == true) {
+            delay(maxWaitMs - minWaitMs)
             return
         }
         val deadline = System.currentTimeMillis() + maxWaitMs - minWaitMs
@@ -1433,6 +1981,180 @@ class AgentOrchestrator(private val context: Context) {
             delay(pollIntervalMs)
         }
         Log.d(TAG, "UI settle timed out at ${maxWaitMs}ms")
+    }
+
+    /**
+     * Updates the pinned first message in conversation history with current task + planning guidance.
+     * This ensures the original task is always visible even after history trimming.
+     */
+    private fun updatePinnedTaskMessage(task: String, plan: PlanningResult?) {
+        if (conversationHistory.isEmpty()) return
+        val pinnedText = buildString {
+            append("TASK: $task")
+            if (plan != null) {
+                append("\n\nSTRATEGIC GUIDANCE:\n")
+                append(plan.toGuidanceText())
+            }
+        }
+        conversationHistory[0] = Message(
+            role = "user",
+            content = listOf(ContentBlock.TextContent(text = pinnedText))
+        )
+    }
+
+    /**
+     * Sliding window: keeps the first (pinned task) message + last [maxWindowSize] messages,
+     * inserting a bridging note where history was trimmed.
+     */
+    private fun trimConversationHistory(maxWindowSize: Int = 12) {
+        // first message + bridging note + last N = maxWindowSize + 2
+        if (conversationHistory.size <= maxWindowSize + 2) return
+        val first = conversationHistory.first()
+        val trimCount = conversationHistory.size - maxWindowSize - 1
+        val bridgingNote = Message(
+            role = "user",
+            content = listOf(ContentBlock.TextContent(
+                text = "[Conversation history trimmed — $trimCount earlier messages removed to save context. The pinned TASK message above is always current. Focus on the current screen state and recent actions.]"
+            ))
+        )
+        val tail = conversationHistory.takeLast(maxWindowSize)
+        conversationHistory.clear()
+        conversationHistory.add(first)
+        conversationHistory.add(bridgingNote)
+        conversationHistory.addAll(tail)
+        Log.d(TAG, "Trimmed conversation history: removed $trimCount messages, now ${conversationHistory.size}")
+    }
+
+    /**
+     * Computes a structural hash of the element map using CRC32.
+     * Quantizes positions to 100px grid and truncates text to 20 chars
+     * so minor layout shifts don't produce different hashes.
+     */
+    private fun computeScreenStructureHash(elementMap: ElementMap): Long {
+        val crc = CRC32()
+        for (el in elementMap.elements) {
+            val typeStr = el.type.name
+            val qx = (el.bounds.centerX() / 100) * 100
+            val qy = (el.bounds.centerY() / 100) * 100
+            val truncText = el.text.take(20)
+            val clickable = if (el.isClickable) "C" else ""
+            val entry = "$typeStr@${qx},${qy}:${truncText}$clickable\n"
+            crc.update(entry.toByteArray())
+        }
+        return crc.value
+    }
+
+    /**
+     * Pattern-matches on safety checker reason to generate specific actionable directives
+     * instead of the generic "Re-analyze" message.
+     */
+    private fun buildSafetyDirective(reason: String, step: SemanticStep): String {
+        val reasonLower = reason.lowercase()
+        val directive = when {
+            "disappeared" in reasonLower || "not found" in reasonLower || "missing" in reasonLower ->
+                "The element '${step.element}' has DISAPPEARED from the screen since you planned this action. " +
+                "A navigation change, popup, or screen transition likely occurred. " +
+                "ACTION: Re-read the current element map carefully. Find the NEW element that corresponds " +
+                "to what you were trying to interact with, or dismiss any dialog/popup that appeared."
+
+            "re-indexed" in reasonLower || "index" in reasonLower || "id changed" in reasonLower ->
+                "The element '${step.element}' has been RE-INDEXED — its ID changed because the element map was " +
+                "regenerated after a UI update. The element you want probably still exists but with a DIFFERENT ID. " +
+                "ACTION: Search the current element map for an element with similar text/type/position and use its new ID."
+
+            "shifted" in reasonLower || "moved" in reasonLower || "position" in reasonLower ->
+                "The element '${step.element}' has SHIFTED position, likely due to keyboard appearance, " +
+                "content loading, or a layout change. " +
+                "ACTION: If keyboard appeared, dismiss it first. Then re-locate the element in the updated map — " +
+                "it should have similar text but different coordinates."
+
+            "modal" in reasonLower || "dialog" in reasonLower || "popup" in reasonLower || "overlay" in reasonLower ->
+                "A MODAL/DIALOG/POPUP has appeared on top of your target element. " +
+                "ACTION: First dismiss the overlay — look for 'OK', 'Cancel', 'Dismiss', 'X', 'Got it', or " +
+                "'Allow'/'Deny' buttons. Only after clearing it should you retry your intended action."
+
+            "different screen" in reasonLower || "wrong screen" in reasonLower || "navigated" in reasonLower ->
+                "The app NAVIGATED AWAY from the expected screen. Your target element is on a different screen. " +
+                "ACTION: Check what screen you're currently on. Navigate back or to the correct screen first."
+
+            else ->
+                "Verification failed: $reason. The UI has changed since this action was planned. " +
+                "ACTION: Re-examine the CURRENT element map (not your cached memory of it). " +
+                "Identify what changed and adapt your next action to the actual current screen state."
+        }
+        return "SAFETY CHECK FAILED for step '${step.description}':\n$directive"
+    }
+
+    /**
+     * Asks a fast model (Haiku) whether the agent is making meaningful progress.
+     * Returns (isProgressing, reason).
+     */
+    private suspend fun checkProgressWithHaiku(
+        claudeClient: LLMClient,
+        task: String,
+        currentMapText: String,
+        recentActionsSummary: String
+    ): Pair<Boolean, String> {
+        val systemPrompt = """
+            You are a progress evaluator for an Android automation agent.
+            Given the original task, current screen state, and recent actions,
+            determine if the agent is making meaningful progress toward completing the task.
+
+            Respond with ONLY a JSON object:
+            {"progressing": true/false, "reason": "brief explanation"}
+
+            Signs of NOT progressing:
+            - Same actions repeated without visible change
+            - Clicking elements that don't advance the task
+            - Navigating in circles between screens
+            - Getting stuck on irrelevant screens
+
+            Signs of progressing:
+            - New screens being reached
+            - Form fields being filled
+            - Navigation toward task goal
+            - Meaningful UI changes after actions
+        """.trimIndent()
+
+        val prompt = """
+            Task: $task
+
+            Current screen element map (truncated):
+            ${currentMapText.take(2000)}
+
+            Last 5 actions:
+            $recentActionsSummary
+
+            Is the agent making meaningful progress toward the task?
+        """.trimIndent()
+
+        val messages = listOf(Message(role = "user", content = listOf(
+            ContentBlock.TextContent(text = prompt)
+        )))
+
+        val result = withContext(Dispatchers.IO) {
+            claudeClient.sendMessage(messages, systemPrompt)
+        }
+        val text = result.getOrNull()?.content?.firstOrNull()?.text
+            ?: return Pair(true, "Progress check unavailable") // Fail open
+
+        return try {
+            var cleanJson = text.trim()
+            val startIdx = cleanJson.indexOf('{')
+            val endIdx = cleanJson.lastIndexOf('}')
+            if (startIdx >= 0 && endIdx > startIdx) {
+                cleanJson = cleanJson.substring(startIdx, endIdx + 1)
+            }
+            val reader = com.google.gson.stream.JsonReader(java.io.StringReader(cleanJson))
+            reader.isLenient = true
+            val json = com.google.gson.JsonParser.parseReader(reader).asJsonObject
+            val progressing = json.get("progressing")?.asBoolean ?: true
+            val reason = json.get("reason")?.asString ?: "Unknown"
+            Pair(progressing, reason)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to parse progress check response: $text", e)
+            Pair(true, "Parse error") // Fail open
+        }
     }
 
     companion object {

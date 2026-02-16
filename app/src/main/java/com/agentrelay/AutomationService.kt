@@ -9,20 +9,31 @@ import android.view.accessibility.AccessibilityEvent
 import android.os.Bundle
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import com.agentrelay.intervention.InterventionTracker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 
 class AutomationService : AccessibilityService() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
 
+    /** Set to true while dispatching agent gestures so we can filter them from intervention tracking */
+    val isAgentGesture = AtomicBoolean(false)
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // We don't need to handle events for this use case
+        if (event == null) return
+        // Forward to InterventionTracker if tracking is enabled and this isn't our own gesture
+        if (!isAgentGesture.get()) {
+            try {
+                InterventionTracker.getInstance(this).onAccessibilityEvent(event)
+            } catch (_: Exception) {}
+        }
     }
 
     override fun onInterrupt() {
@@ -40,6 +51,31 @@ class AutomationService : AccessibilityService() {
     override fun onDestroy() {
         super.onDestroy()
         instance = null
+    }
+
+    /**
+     * Dispatches a gesture with the agent gesture flag set, so that
+     * InterventionTracker can distinguish agent gestures from user input.
+     */
+    private fun dispatchAgentGesture(
+        gesture: GestureDescription,
+        callback: GestureResultCallback
+    ): Boolean {
+        isAgentGesture.set(true)
+        val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                isAgentGesture.set(false)
+                callback.onCompleted(gestureDescription)
+            }
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                isAgentGesture.set(false)
+                callback.onCancelled(gestureDescription)
+            }
+        }, null)
+        if (!dispatched) {
+            isAgentGesture.set(false)
+        }
+        return dispatched
     }
 
     suspend fun performTap(x: Int, y: Int): Boolean {
@@ -82,7 +118,7 @@ class AutomationService : AccessibilityService() {
                 }
             }
 
-            val dispatched = dispatchGesture(gesture, callback, null)
+            val dispatched = dispatchAgentGesture(gesture, callback)
             if (!dispatched) {
                 Log.e(TAG, "Failed to dispatch tap gesture")
                 if (continuation.isActive) {
@@ -115,7 +151,7 @@ class AutomationService : AccessibilityService() {
                 }
             }
 
-            val dispatched = dispatchGesture(gesture, callback, null)
+            val dispatched = dispatchAgentGesture(gesture, callback)
             if (!dispatched) {
                 Log.e(TAG, "Failed to dispatch long press gesture")
                 if (continuation.isActive) continuation.resume(false)
@@ -153,7 +189,7 @@ class AutomationService : AccessibilityService() {
                 }
             }
 
-            val dispatched = dispatchGesture(gesture, callback, null)
+            val dispatched = dispatchAgentGesture(gesture, callback)
             if (!dispatched) {
                 Log.e(TAG, "Failed to dispatch swipe gesture")
                 if (continuation.isActive) {
@@ -165,25 +201,34 @@ class AutomationService : AccessibilityService() {
 
     suspend fun performType(text: String): Boolean {
         return try {
-            // Strategy 1: ACTION_SET_TEXT (most reliable, works on most standard fields)
-            if (trySetText(text)) return true
+            val success = when {
+                // Strategy 1: ACTION_SET_TEXT (most reliable, works on most standard fields)
+                trySetText(text) -> true
 
-            // Strategy 2: Clipboard paste
-            if (tryClipboardPaste(text)) {
-                delay(200)
-                if (verifyTextEntered(text)) return true
-                Log.w(TAG, "Paste reported success but text not verified, trying fallback")
+                // Strategy 2: Clipboard paste
+                tryClipboardPaste(text) && run {
+                    delay(200)
+                    verifyTextEntered(text).also { if (!it) Log.w(TAG, "Paste reported success but text not verified, trying fallback") }
+                } -> true
+
+                // Strategy 3: Character-by-character key dispatch via InputConnection
+                tryKeyboardInput(text).also { if (!it) Log.d(TAG, "Falling back to character-by-character input") } -> true
+
+                // Strategy 4: Last resort - set text on any editable node on screen
+                trySetTextOnAnyEditable(text) -> true
+
+                else -> {
+                    Log.e(TAG, "All text input strategies failed for: ${text.take(50)}")
+                    false
+                }
             }
 
-            // Strategy 3: Character-by-character key dispatch via InputConnection
-            Log.d(TAG, "Falling back to character-by-character input")
-            if (tryKeyboardInput(text)) return true
+            // Auto-dismiss keyboard after typing so it doesn't obstruct the next action
+            if (success) {
+                dismissKeyboard()
+            }
 
-            // Strategy 4: Last resort - set text on any editable node on screen
-            if (trySetTextOnAnyEditable(text)) return true
-
-            Log.e(TAG, "All text input strategies failed for: ${text.take(50)}")
-            false
+            success
         } catch (e: Exception) {
             Log.e(TAG, "Failed to type text", e)
             false
@@ -421,6 +466,12 @@ class AutomationService : AccessibilityService() {
         val timeFormat = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss z", java.util.Locale.getDefault())
         val currentTime = timeFormat.format(java.util.Date())
 
+        // Device locale and country
+        val locale = java.util.Locale.getDefault()
+        val country = locale.displayCountry
+        val language = locale.displayLanguage
+        val timeZone = java.util.TimeZone.getDefault().id
+
         // Installed apps — use pre-cached list (refreshed on service connect / app open)
         val installedApps = DeviceContextCache.installedApps.ifEmpty {
             // Fallback: cache not ready yet, trigger async refresh and use empty for now
@@ -436,6 +487,9 @@ class AutomationService : AccessibilityService() {
             keyboardVisible = keyboardVisible,
             windowList = windowList,
             currentTime = currentTime,
+            country = country,
+            language = language,
+            timeZone = timeZone,
             installedApps = installedApps
         )
     }
@@ -513,21 +567,33 @@ data class DeviceContext(
     val keyboardVisible: Boolean,
     val windowList: List<String>,
     val currentTime: String,
+    val country: String = "",
+    val language: String = "",
+    val timeZone: String = "",
     val installedApps: List<AppInfo>
 ) {
     fun toPromptText(): String = buildString {
         appendLine("DEVICE CONTEXT:")
         appendLine("  Current app: $currentAppName ($currentAppPackage)")
         appendLine("  Current time: $currentTime")
+        if (country.isNotEmpty()) {
+            appendLine("  Location: $country (language: $language, timezone: $timeZone)")
+            appendLine("  IMPORTANT: The user is in $country. Always prefer apps and services appropriate for this country (e.g. Google Maps, not Baidu Maps, in the US).")
+        }
         appendLine("  Keyboard visible: $keyboardVisible")
         if (windowList.isNotEmpty()) {
             appendLine("  Active windows: ${windowList.joinToString(", ")}")
         }
-        appendLine("  Installed apps (${installedApps.size}): ${installedApps.joinToString(", ") { it.name }}")
+        appendLine("  Installed apps (${installedApps.size}):")
+        installedApps.forEach { app ->
+            val desc = if (app.description != null) " — ${app.description}" else ""
+            appendLine("    - ${app.name} [${app.packageName}]$desc")
+        }
     }
 }
 
 data class AppInfo(
     val name: String,
-    val packageName: String
+    val packageName: String,
+    val description: String? = null
 )

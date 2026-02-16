@@ -11,7 +11,7 @@ data class VerificationResult(
 
 class VerificationClient(
     private val automationService: AutomationService,
-    private val claudeClient: ClaudeAPIClient,
+    private val claudeClient: LLMClient,
     private val secureStorage: SecureStorage
 ) {
 
@@ -82,7 +82,7 @@ class VerificationClient(
         val haikuModel = "claude-haiku-4-5-20251001"
         val apiKey = secureStorage.getApiKeyForModel(haikuModel) ?: return VerificationResult(false, "No Claude API key for verification")
 
-        val haikuClient = ClaudeAPIClient(apiKey, haikuModel)
+        val haikuClient = LLMClientFactory.create(apiKey, haikuModel)
 
         val prompt = """
             ORIGINAL ELEMENT MAP:

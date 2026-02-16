@@ -7,6 +7,8 @@ import androidx.security.crypto.MasterKey
 
 class SecureStorage(context: Context) {
 
+    private val appContext: Context = context.applicationContext
+
     private val sharedPreferences: SharedPreferences = try {
         val masterKey = MasterKey.Builder(context)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
@@ -46,24 +48,16 @@ class SecureStorage(context: Context) {
         }
     }
 
-    // Per-provider API key storage
-    fun saveApiKey(apiKey: String) {
-        // Legacy: also saves to old key for backward compat
-        sharedPreferences.edit().putString(KEY_API_KEY, apiKey).apply()
-    }
-
-    fun getApiKey(): String? {
-        return sharedPreferences.getString(KEY_API_KEY, null)
-    }
-
     fun saveClaudeApiKey(key: String) {
         sharedPreferences.edit().putString(KEY_CLAUDE_API_KEY, key).apply()
     }
 
     fun getClaudeApiKey(): String? {
-        // Fall back to legacy key for migration
         return sharedPreferences.getString(KEY_CLAUDE_API_KEY, null)
-            ?: sharedPreferences.getString(KEY_API_KEY, null)
+            ?: try {
+                val resId = appContext.resources.getIdentifier("default_claude_api_key", "string", appContext.packageName)
+                if (resId != 0) appContext.getString(resId).ifEmpty { null } else null
+            } catch (_: Exception) { null }
     }
 
     fun saveOpenAIApiKey(key: String) {
@@ -102,7 +96,6 @@ class SecureStorage(context: Context) {
 
     fun clearApiKey() {
         sharedPreferences.edit()
-            .remove(KEY_API_KEY)
             .remove(KEY_CLAUDE_API_KEY)
             .remove(KEY_OPENAI_API_KEY)
             .remove(KEY_GEMINI_API_KEY)
@@ -217,8 +210,31 @@ class SecureStorage(context: Context) {
         return sharedPreferences.getString(KEY_PLANNING_MODEL, "claude-opus-4-6") ?: "claude-opus-4-6"
     }
 
+    fun setScreenRecordingEnabled(enabled: Boolean) {
+        sharedPreferences.edit().putBoolean(KEY_SCREEN_RECORDING_ENABLED, enabled).apply()
+    }
+
+    fun getScreenRecordingEnabled(): Boolean {
+        return sharedPreferences.getBoolean(KEY_SCREEN_RECORDING_ENABLED, false)
+    }
+
+    fun setBlockTouchDuringAgent(enabled: Boolean) {
+        sharedPreferences.edit().putBoolean(KEY_BLOCK_TOUCH_DURING_AGENT, enabled).apply()
+    }
+
+    fun getBlockTouchDuringAgent(): Boolean {
+        return sharedPreferences.getBoolean(KEY_BLOCK_TOUCH_DURING_AGENT, false)
+    }
+
+    fun setInterventionTrackingEnabled(enabled: Boolean) {
+        sharedPreferences.edit().putBoolean(KEY_INTERVENTION_TRACKING, enabled).apply()
+    }
+
+    fun getInterventionTrackingEnabled(): Boolean {
+        return sharedPreferences.getBoolean(KEY_INTERVENTION_TRACKING, true)
+    }
+
     companion object {
-        private const val KEY_API_KEY = "claude_api_key" // legacy
         private const val KEY_CLAUDE_API_KEY = "claude_api_key_v2"
         private const val KEY_OPENAI_API_KEY = "openai_api_key"
         private const val KEY_GEMINI_API_KEY = "gemini_api_key"
@@ -233,11 +249,14 @@ class SecureStorage(context: Context) {
         private const val KEY_PLANNING_ENABLED = "planning_enabled"
         private const val KEY_SEND_SCREENSHOTS_TO_LLM = "send_screenshots_to_llm"
         private const val KEY_PLANNING_MODEL = "planning_model"
+        private const val KEY_SCREEN_RECORDING_ENABLED = "screen_recording_enabled"
+        private const val KEY_BLOCK_TOUCH_DURING_AGENT = "block_touch_during_agent"
+        private const val KEY_INTERVENTION_TRACKING = "intervention_tracking_enabled"
 
         fun providerForModel(model: String): Provider {
             return when {
                 model.startsWith("claude") -> Provider.CLAUDE
-                model.startsWith("gpt") || model.startsWith("o1") || model.startsWith("o3") || model.startsWith("o4") -> Provider.OPENAI
+                model.startsWith("gpt") || model.startsWith("chatgpt") || model.startsWith("o1") || model.startsWith("o3") || model.startsWith("o4") -> Provider.OPENAI
                 model.startsWith("gemini") -> Provider.GEMINI
                 else -> Provider.CLAUDE
             }

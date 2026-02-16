@@ -55,7 +55,7 @@ class PlanningAgent(
     apiKey: String,
     model: String = "claude-opus-4-6"
 ) {
-    private val client = ClaudeAPIClient(apiKey, model)
+    private val client = LLMClientFactory.create(apiKey, model)
 
     suspend fun planInitial(
         task: String,
@@ -98,19 +98,29 @@ class PlanningAgent(
                 }
 
                 SPLIT-SCREEN PARALLEL EXECUTION:
-                If the task benefits from using two apps simultaneously, include a "splitScreen" field.
-                Two key patterns:
-                1. LOOKUP + ACTION: One app finds info, the other uses it (e.g., Contacts → Gmail)
-                2. PARALLEL SEARCH: Compare results across two apps simultaneously (e.g., search Amazon
-                   and eBay for the cheapest price of a product). Look at the installed apps list and pick
-                   the two most relevant apps for comparison.
+                You MUST include a "splitScreen" field when the task matches ANY of these patterns:
+
+                PATTERN 1 — LOOKUP + ACTION: One app finds info, the other uses it.
+                  Trigger phrases: "find X in App1 and use it in App2", "look up X then email/text/message"
+                  Examples: "Find John's email in Contacts and email him in Gmail", "Look up a recipe and add ingredients to shopping list"
+
+                PATTERN 2 — PARALLEL SEARCH / COMPARE: The task involves searching, comparing, or finding the best option across 2+ apps or websites.
+                  Trigger phrases: "find cheapest", "compare prices", "search on X and Y", "find best deal", "check both", "on Temu and Amazon", "across apps"
+                  Examples: "Find cheapest acoustic guitar on Temu and Amazon", "Compare flight prices on United and Delta apps", "Find best rated headphones across shopping apps"
+                  IMPORTANT: If the task mentions TWO OR MORE shopping/search apps BY NAME (e.g., "Temu and Amazon", "eBay and Walmart"), ALWAYS recommend split-screen.
+
+                PATTERN 3 — MULTI-APP COORDINATION: The task naturally involves two apps working together.
+                  Examples: "Copy text from Notes and paste into Messages", "Check calendar and set alarm"
+
+                When recommending split-screen:
+                - Use EXACT package names from the installed apps list
+                - Each sub-task description should be self-contained (the agent in each half only sees its own task)
+                - For PARALLEL SEARCH, each sub-task should include instructions to use "share_finding" to report what it finds (price, rating, link, etc.)
 
                 Format: "splitScreen": {"recommended": true, "topApp": "pkg.name", "bottomApp": "pkg.name",
                 "topTask": "description of what the top agent should do", "bottomTask": "description of what the bottom agent should do"}
 
-                For parallel search, each sub-task should include "share_finding" to report what it finds
-                (e.g., price, availability) so results can be compared.
-                Only recommend split-screen for genuine multi-app coordination, not simple single-app tasks.
+                Do NOT recommend split-screen for simple single-app tasks (e.g., "set an alarm", "send a text to John").
 
                 ${if (installedApps.isNotEmpty()) "Installed apps:\n${installedApps.joinToString("\n") { "- ${it.name} (${it.packageName})" }}" else ""}
 
@@ -171,12 +181,19 @@ class PlanningAgent(
                 fundamentally DIFFERENT approaches — not just retrying the same thing.
 
                 CRITICAL RECOVERY RULES:
-                1. Consider switching to a COMPLETELY DIFFERENT APP. If the current app isn't working, suggest an alternative (e.g., if Messenger fails, try SMS; if Gmail fails, try another email app).
-                2. Each approach MUST specify the target app package name.
-                3. NEVER fabricate contact details (emails, phone numbers). Only use what the user provided or what's visible on screen. If missing, suggest searching for the contact on the device.
-                4. If the agent keeps clicking the same element without progress, the element may not be interactive in the expected way — suggest a completely different UI flow.
-                5. The agent MUST NOT act inside "com.agentrelay".
-                6. Consider SPLIT-SCREEN mode if the task involves two apps. Include "splitScreen" field if recommending it:
+                1. DIAGNOSE THE ROOT CAUSE first. Common loop causes include:
+                   - Clicking the WRONG element (multiple buttons with similar text, clicking a label instead of the actual button)
+                   - The KEYBOARD is covering the target element — dismiss it first
+                   - The target is OFF-SCREEN — needs scrolling down (or up) to reach it
+                   - A POPUP, DIALOG, or PERMISSION PROMPT is blocking interaction
+                   - The element is NOT INTERACTIVE in the expected way — needs long-press, swipe, or different gesture
+                   - The agent is on the WRONG SCREEN and previous navigation didn't take effect
+                2. Consider switching to a COMPLETELY DIFFERENT APP. If the current app isn't working, suggest an alternative (e.g., if Messenger fails, try SMS; if Gmail fails, try another email app).
+                3. Each approach MUST specify the target app package name.
+                4. NEVER fabricate contact details (emails, phone numbers). Only use what the user provided or what's visible on screen. If missing, suggest searching for the contact on the device.
+                5. If the agent keeps clicking the same element without progress, the element may not be interactive in the expected way — suggest a completely different UI flow (e.g., use search instead of scrolling, use a menu instead of a toolbar button, try settings instead of in-app controls).
+                6. The agent MUST NOT act inside "com.agentrelay".
+                7. Consider SPLIT-SCREEN mode if the task involves two apps. Include "splitScreen" field if recommending it:
                    "splitScreen": {"recommended": true, "topApp": "pkg", "bottomApp": "pkg", "topTask": "...", "bottomTask": "..."}
 
                 Previous failures:
@@ -307,6 +324,67 @@ class PlanningAgent(
                 ),
                 recommendedIndex = 0
             )
+        }
+    }
+
+    /**
+     * Generates 1-line capability descriptions for a batch of apps using the planning LLM.
+     * Returns a map of packageName → description.
+     */
+    suspend fun generateAppKnowledge(apps: List<AppInfo>): Map<String, String> {
+        if (apps.isEmpty()) return emptyMap()
+
+        return try {
+            val appList = apps.joinToString("\n") { "- ${it.name} [${it.packageName}]" }
+            val systemPrompt = """
+                You are a mobile app expert. For each Android app listed below, provide a concise 1-line description
+                of its primary capabilities (what a user can DO with it). Focus on actionable capabilities, not marketing copy.
+
+                Respond with ONLY a valid JSON object mapping package name to description string.
+                Example: {"com.android.chrome": "Browse websites, search the web, manage bookmarks and tabs"}
+
+                Keep each description under 80 characters. Be specific about what actions are possible.
+
+                Apps:
+                $appList
+            """.trimIndent()
+
+            val messages = listOf(
+                Message(
+                    role = "user",
+                    content = listOf(ContentBlock.TextContent(text = "Generate capability descriptions for these ${apps.size} apps."))
+                )
+            )
+
+            val result = client.sendMessage(messages, systemPrompt)
+            val text = result.getOrNull()?.content?.firstOrNull()?.text ?: return emptyMap()
+
+            var cleanJson = text.trim()
+            if (cleanJson.contains("```json")) {
+                cleanJson = cleanJson.substringAfter("```json").substringBefore("```").trim()
+            } else if (cleanJson.contains("```")) {
+                cleanJson = cleanJson.substringAfter("```").substringBefore("```").trim()
+            }
+            val startIdx = cleanJson.indexOf('{')
+            val endIdx = cleanJson.lastIndexOf('}')
+            if (startIdx >= 0 && endIdx > startIdx) {
+                cleanJson = cleanJson.substring(startIdx, endIdx + 1)
+            }
+
+            val reader = com.google.gson.stream.JsonReader(java.io.StringReader(cleanJson))
+            reader.isLenient = true
+            val json = JsonParser.parseReader(reader).asJsonObject
+            val descriptions = mutableMapOf<String, String>()
+            for (entry in json.entrySet()) {
+                try {
+                    descriptions[entry.key] = entry.value.asString
+                } catch (_: Exception) {}
+            }
+            Log.d(TAG, "Generated ${descriptions.size} app descriptions")
+            descriptions
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to generate app knowledge", e)
+            emptyMap()
         }
     }
 

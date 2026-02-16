@@ -15,8 +15,10 @@ class FloatingBubble(private val context: Context) {
 
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private var bubbleView: BubbleView? = null
+    private var dismissView: DismissZoneView? = null
     private var isShowing = false
     private var params: WindowManager.LayoutParams? = null
+    private var dismissParams: WindowManager.LayoutParams? = null
 
     fun show() {
         if (isShowing) return
@@ -59,6 +61,7 @@ class FloatingBubble(private val context: Context) {
 
     fun hide() {
         if (!isShowing) return
+        hideDismissZone()
         bubbleView?.let { view ->
             try {
                 windowManager.removeView(view)
@@ -70,6 +73,56 @@ class FloatingBubble(private val context: Context) {
                 Log.e(TAG, "Failed to hide floating bubble", e)
             }
         }
+    }
+
+    private fun showDismissZone() {
+        if (dismissView != null) return
+        val dv = DismissZoneView(context)
+        val lp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            DISMISS_ZONE_HEIGHT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.BOTTOM or Gravity.START
+        }
+        dismissParams = lp
+        try {
+            windowManager.addView(dv, lp)
+            dismissView = dv
+            dv.alpha = 0f
+            dv.animate().alpha(1f).setDuration(150).start()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to show dismiss zone", e)
+        }
+    }
+
+    private fun hideDismissZone() {
+        dismissView?.let { dv ->
+            try {
+                windowManager.removeView(dv)
+            } catch (_: Exception) {}
+            dismissView = null
+            dismissParams = null
+        }
+    }
+
+    private fun isInDismissZone(lp: WindowManager.LayoutParams): Boolean {
+        val bubbleCenterY = lp.y + BUBBLE_SIZE / 2
+        // Use the dismiss zone view's actual on-screen position for accurate hit testing.
+        // This accounts for navigation bar insets which offset the Gravity.BOTTOM view.
+        val dv = dismissView
+        if (dv != null) {
+            val loc = IntArray(2)
+            dv.getLocationOnScreen(loc)
+            return bubbleCenterY > loc[1]
+        }
+        // Fallback if dismiss zone isn't showing yet
+        val threshold = screenHeight() - DISMISS_ZONE_HEIGHT
+        return bubbleCenterY > threshold
     }
 
     private fun setupTouch(view: BubbleView, lp: WindowManager.LayoutParams) {
@@ -94,13 +147,20 @@ class FloatingBubble(private val context: Context) {
                     val dx = event.rawX - initialTouchX
                     val dy = event.rawY - initialTouchY
                     if (abs(dx) > 10 || abs(dy) > 10) {
-                        isDragging = true
+                        if (!isDragging) {
+                            isDragging = true
+                            showDismissZone()
+                        }
                     }
                     lp.x = initialX + dx.toInt()
                     lp.y = initialY + dy.toInt()
                     try {
                         windowManager.updateViewLayout(view, lp)
                     } catch (_: Exception) {}
+                    // Highlight dismiss zone when bubble is near
+                    val inZone = isInDismissZone(lp)
+                    dismissView?.setHighlighted(inZone)
+                    view.alpha = if (inZone) 0.5f else 1f
                     true
                 }
                 MotionEvent.ACTION_UP -> {
@@ -109,7 +169,14 @@ class FloatingBubble(private val context: Context) {
                         // Tap — open the agent overlay window
                         view.showTapFeedback()
                         OverlayWindow.getInstance(context).show()
+                    } else if (isInDismissZone(lp)) {
+                        // Dismiss the bubble
+                        hideDismissZone()
+                        hide()
+                        SecureStorage.getInstance(context).setFloatingBubbleEnabled(false)
+                        Log.d(TAG, "Bubble dismissed by drag to bottom")
                     } else {
+                        hideDismissZone()
                         // Snap to nearest edge
                         snapToEdge(view, lp)
                     }
@@ -117,6 +184,8 @@ class FloatingBubble(private val context: Context) {
                 }
                 MotionEvent.ACTION_CANCEL -> {
                     view.setPressed(false)
+                    hideDismissZone()
+                    view.alpha = 1f
                     true
                 }
                 else -> false
@@ -208,9 +277,49 @@ class FloatingBubble(private val context: Context) {
         }
     }
 
+    private class DismissZoneView(context: Context) : View(context) {
+
+        private var highlighted = false
+
+        private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(60, 255, 59, 48)
+            style = Paint.Style.FILL
+        }
+
+        private val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(120, 255, 59, 48)
+            style = Paint.Style.FILL
+        }
+
+        private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 36f
+            textAlign = Paint.Align.CENTER
+        }
+
+        fun setHighlighted(value: Boolean) {
+            if (highlighted != value) {
+                highlighted = value
+                invalidate()
+            }
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            val paint = if (highlighted) highlightPaint else bgPaint
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+            // Draw X icon
+            val cx = width / 2f
+            val cy = height / 2f
+            val textY = cy - (iconPaint.descent() + iconPaint.ascent()) / 2
+            iconPaint.alpha = if (highlighted) 255 else 180
+            canvas.drawText("\u2715", cx, textY, iconPaint) // ✕
+        }
+    }
+
     companion object {
         private const val TAG = "FloatingBubble"
         private const val BUBBLE_SIZE = 140 // px
+        private const val DISMISS_ZONE_HEIGHT = 200 // px
 
         @Volatile
         private var instance: FloatingBubble? = null

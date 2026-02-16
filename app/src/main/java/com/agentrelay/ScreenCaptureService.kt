@@ -22,8 +22,6 @@ import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
 import java.io.ByteArrayOutputStream
-import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
 
 class ScreenCaptureService : Service() {
 
@@ -100,10 +98,9 @@ class ScreenCaptureService : Service() {
                     }
                     Log.d(TAG, "Initializing MediaProjection with permission data")
                     initMediaProjection(resultCode, data)
-                    // Show floating bubble if enabled
-                    if (SecureStorage.getInstance(this).getFloatingBubbleEnabled()) {
-                        FloatingBubble.getInstance(this).show()
-                    }
+                    // Always re-enable and show floating bubble when service starts
+                    SecureStorage.getInstance(this).setFloatingBubbleEnabled(true)
+                    FloatingBubble.getInstance(this).show()
                 } else {
                     // No valid projection data - start foreground without mediaProjection type
                     startForegroundSafe(notification)
@@ -148,6 +145,29 @@ class ScreenCaptureService : Service() {
             } catch (e2: Exception) {
                 Log.e(TAG, "startForeground completely failed", e2)
             }
+        }
+    }
+
+    /** Exposes the active MediaProjection for screen recording. */
+    fun getMediaProjection(): MediaProjection? = mediaProjection
+    fun getVirtualDisplay(): VirtualDisplay? = virtualDisplay
+    fun getImageReaderSurface(): android.view.Surface? = imageReader?.surface
+    fun getScreenWidth(): Int = screenWidth
+    fun getScreenHeight(): Int = screenHeight
+    fun getScreenDensity(): Int = screenDensity
+
+    /** Returns true if MediaProjection + VirtualDisplay + ImageReader are all alive. */
+    fun hasActiveProjection(): Boolean =
+        mediaProjection != null && virtualDisplay != null && imageReader != null
+
+    /** Returns a diagnostic string describing VirtualDisplay state. */
+    fun getVirtualDisplayInfo(): String = buildString {
+        append("projection=${mediaProjection != null}")
+        append(", virtualDisplay=${virtualDisplay != null}")
+        append(", imageReader=${imageReader != null}")
+        append(", dims=${screenWidth}x${screenHeight}@${screenDensity}dpi")
+        if (virtualDisplay != null) {
+            append(", vdName=${virtualDisplay!!.display?.name ?: "unknown"}")
         }
     }
 
@@ -210,41 +230,57 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    suspend fun captureScreenshot(): ScreenshotInfo? = suspendCoroutine { continuation ->
+    suspend fun captureScreenshot(): ScreenshotInfo? {
         val reader = imageReader
         if (reader == null) {
             Log.e(TAG, "ImageReader not initialized")
-            continuation.resume(null)
-            return@suspendCoroutine
+            return null
         }
 
-        try {
-            val image = reader.acquireLatestImage()
-            if (image == null) {
-                Log.e(TAG, "Failed to acquire image")
-                continuation.resume(null)
-                return@suspendCoroutine
+        val maxAttempts = 3
+        for (attempt in 1..maxAttempts) {
+            try {
+                val image = reader.acquireLatestImage()
+                if (image == null) {
+                    Log.w(TAG, "Failed to acquire image (attempt $attempt/$maxAttempts)")
+                    if (attempt < maxAttempts) {
+                        delay(40)
+                        continue
+                    }
+                    return null
+                }
+
+                try {
+                    val bitmap = imageToBitmap(image)
+                    if (bitmap == null) {
+                        Log.e(TAG, "Failed to convert image to bitmap")
+                        if (attempt < maxAttempts) {
+                            delay(40)
+                            continue
+                        }
+                        return null
+                    }
+
+                    val actualWidth = screenWidth
+                    val actualHeight = screenHeight
+                    val screenshotInfo = bitmapToBase64WithDimensions(bitmap, actualWidth, actualHeight)
+                    bitmap.recycle()
+
+                    return screenshotInfo
+                } finally {
+                    image.close()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Screenshot capture attempt $attempt/$maxAttempts failed", e)
+                if (attempt < maxAttempts) {
+                    delay(40)
+                    continue
+                }
+                return null
             }
-
-            val bitmap = imageToBitmap(image)
-            image.close()
-
-            if (bitmap == null) {
-                Log.e(TAG, "Failed to convert image to bitmap")
-                continuation.resume(null)
-                return@suspendCoroutine
-            }
-
-            val actualWidth = screenWidth
-            val actualHeight = screenHeight
-            val screenshotInfo = bitmapToBase64WithDimensions(bitmap, actualWidth, actualHeight)
-            bitmap.recycle()
-
-            continuation.resume(screenshotInfo)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to capture screenshot", e)
-            continuation.resume(null)
         }
+
+        return null
     }
 
     /**
@@ -319,8 +355,8 @@ class ScreenCaptureService : Service() {
             Log.d(TAG, "Auto quality: lastSpeed=${lastSpeed}KB/s → quality=$quality")
         }
 
-        // Scale down for API efficiency
-        val maxDimension = 1920
+        // Scale down for API efficiency - more aggressive for low quality
+        val maxDimension = if (quality <= 10) 768 else 1920
         val scale = if (bitmap.width > bitmap.height) {
             maxDimension.toFloat() / bitmap.width
         } else {
@@ -476,17 +512,13 @@ class ScreenCaptureService : Service() {
 
         @androidx.annotation.VisibleForTesting
         internal fun computeAutoQuality(lastSpeedKBps: Float): Int = when {
-            lastSpeedKBps == 0f -> 60   // First time, use moderate quality
-            lastSpeedKBps > 1000f -> 95 // Very fast (>1 MB/s)
-            lastSpeedKBps > 800f -> 90  // Fast (>800 KB/s)
-            lastSpeedKBps > 600f -> 85  // Good (>600 KB/s)
-            lastSpeedKBps > 400f -> 80  // Above average (>400 KB/s)
-            lastSpeedKBps > 300f -> 75  // Average (>300 KB/s)
-            lastSpeedKBps > 200f -> 65  // Below average (>200 KB/s)
-            lastSpeedKBps > 150f -> 55  // Slow (>150 KB/s)
-            lastSpeedKBps > 100f -> 45  // Very slow (>100 KB/s)
-            lastSpeedKBps > 50f -> 35   // Extremely slow (>50 KB/s)
-            else -> 25                  // Minimal quality for very poor connections (<50 KB/s)
+            lastSpeedKBps == 0f -> 30   // First time, use moderate quality
+            lastSpeedKBps > 1000f -> 50 // Very fast (>1 MB/s)
+            lastSpeedKBps > 600f -> 40  // Fast (>600 KB/s)
+            lastSpeedKBps > 300f -> 30  // Average (>300 KB/s)
+            lastSpeedKBps > 150f -> 25  // Slow (>150 KB/s)
+            lastSpeedKBps > 50f -> 20   // Very slow (>50 KB/s)
+            else -> 15                  // Minimal quality for very poor connections (<50 KB/s)
         }
     }
 }

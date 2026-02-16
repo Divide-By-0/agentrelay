@@ -1,6 +1,10 @@
+import java.text.SimpleDateFormat
+import java.util.Date
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.google.devtools.ksp")
 }
 
 android {
@@ -18,6 +22,10 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+
+        // Inject build timestamp into BuildConfig
+        val buildTime = SimpleDateFormat("MMM d, yyyy h:mm:ss a z").format(Date())
+        buildConfigField("String", "BUILD_TIMESTAMP", "\"$buildTime\"")
     }
 
     buildTypes {
@@ -41,6 +49,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     composeOptions {
@@ -86,6 +95,11 @@ dependencies {
 
     // JSON parsing
     implementation("com.google.code.gson:gson:2.10.1")
+
+    // Room database
+    implementation("androidx.room:room-runtime:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
+    ksp("androidx.room:room-compiler:2.6.1")
 
     // Testing
     testImplementation("junit:junit:4.13.2")

@@ -44,22 +44,35 @@ private data class GeminiInlineData(
 
 private data class GeminiGenerationConfig(
     @SerializedName("maxOutputTokens")
-    val maxOutputTokens: Int = 4096
+    val maxOutputTokens: Int = 4096,
+    @SerializedName("responseMimeType")
+    val responseMimeType: String? = null
 )
 
 private data class GeminiResponse(
     val candidates: List<GeminiCandidate>?,
+    @SerializedName("promptFeedback")
+    val promptFeedback: GeminiPromptFeedback?,
     val error: GeminiError?
 )
 
 private data class GeminiCandidate(
-    val content: GeminiContent?
+    val content: GeminiContent?,
+    @SerializedName("finishReason")
+    val finishReason: String?
 )
 
 private data class GeminiError(
     val code: Int?,
     val message: String?,
     val status: String?
+)
+
+private data class GeminiPromptFeedback(
+    @SerializedName("blockReason")
+    val blockReason: String?,
+    @SerializedName("blockReasonMessage")
+    val blockReasonMessage: String?
 )
 
 // ── Retrofit interface ──────────────────────────────────────────────────────
@@ -138,15 +151,22 @@ class GeminiClient(
             val request = GeminiRequest(
                 contents = contents,
                 systemInstruction = systemInstruction,
-                generationConfig = GeminiGenerationConfig(maxOutputTokens = 4096)
+                generationConfig = GeminiGenerationConfig(
+                    maxOutputTokens = 4096,
+                    responseMimeType = "application/json"
+                )
             )
 
             val startTime = System.currentTimeMillis()
-            val response = api.generateContent(
-                model = model,
-                apiKey = apiKey,
-                request = request
-            )
+            var activeModel = normalizeModel(model)
+            var response = api.generateContent(model = activeModel, apiKey = apiKey, request = request)
+
+            // Some configured aliases may not be accepted by the Gemini API; retry with known stable fallback.
+            if (!response.isSuccessful && activeModel != FALLBACK_FLASH_MODEL && shouldFallbackModel(response.code())) {
+                Log.w(TAG, "Gemini model '$activeModel' failed (${response.code()}); retrying with '$FALLBACK_FLASH_MODEL'")
+                activeModel = FALLBACK_FLASH_MODEL
+                response = api.generateContent(model = activeModel, apiKey = apiKey, request = request)
+            }
             val endTime = System.currentTimeMillis()
 
             // Report upload stats
@@ -166,8 +186,14 @@ class GeminiClient(
                 if (body.error != null) {
                     Result.failure(Exception("Gemini API Error: ${body.error.message}"))
                 } else {
-                    val text = body.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
-                        ?: throw Exception("No content in Gemini response")
+                    val text = extractCandidateText(body.candidates)
+                    if (text.isNullOrBlank()) {
+                        val blockMsg = body.promptFeedback?.blockReasonMessage
+                            ?: body.promptFeedback?.blockReason
+                            ?: body.candidates?.firstOrNull()?.finishReason
+                            ?: "No content in Gemini response"
+                        throw Exception("No parseable Gemini text: $blockMsg")
+                    }
                     Result.success(text)
                 }
             } else {
@@ -181,5 +207,28 @@ class GeminiClient(
 
     companion object {
         private const val TAG = "GeminiClient"
+        private const val FALLBACK_FLASH_MODEL = "gemini-2.5-flash"
+
+        @androidx.annotation.VisibleForTesting
+        internal fun normalizeModel(model: String): String {
+            return when (model) {
+                "gemini-3.0-flash" -> FALLBACK_FLASH_MODEL
+                else -> model
+            }
+        }
+
+        private fun extractCandidateText(candidates: List<GeminiCandidate>?): String? {
+            if (candidates.isNullOrEmpty()) return null
+            val combined = candidates
+                .asSequence()
+                .flatMap { candidate -> candidate.content?.parts?.asSequence() ?: emptySequence() }
+                .mapNotNull { it.text?.takeIf { text -> text.isNotBlank() } }
+                .joinToString("\n")
+            return combined.takeIf { it.isNotBlank() }
+        }
+
+        private fun shouldFallbackModel(code: Int): Boolean {
+            return code == 400 || code == 404
+        }
     }
 }

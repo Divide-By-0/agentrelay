@@ -36,15 +36,19 @@ class AgentRelayAgent:
         return subprocess.run(cmd, capture_output=True, text=True, check=check)
 
     def _broadcast(self, action: str, extras: dict[str, str] | None = None) -> None:
-        cmd = [
-            "shell", "am", "broadcast",
-            "-n", f"{self.PACKAGE}/{self.PACKAGE}.benchmark.BenchmarkReceiver",
-            "-a", action,
-        ]
+        # Build the full am broadcast command as a single shell string
+        # to avoid adb shell argument splitting issues with spaces/quotes
+        shell_cmd = (
+            f"am broadcast"
+            f" -n {self.PACKAGE}/{self.PACKAGE}.benchmark.BenchmarkReceiver"
+            f" -a {action}"
+        )
         if extras:
             for key, value in extras.items():
-                cmd.extend(["--es", key, value])
-        self._adb(*cmd)
+                # Escape single quotes in value for shell, then wrap in single quotes
+                escaped = value.replace("'", "'\\''")
+                shell_cmd += f" --es {key} '{escaped}'"
+        self._adb("shell", shell_cmd)
 
     def _configure(self) -> None:
         self._broadcast(

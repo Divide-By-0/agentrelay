@@ -8,71 +8,47 @@ class ScreenCaptureQualityTest {
     // ── First-time default ───────────────────────────────────────────────────
 
     @Test
-    fun `zero speed returns 60 (first-time default)`() {
-        assertEquals(60, ScreenCaptureService.computeAutoQuality(0f))
+    fun `zero speed returns 30 (first-time default)`() {
+        assertEquals(30, ScreenCaptureService.computeAutoQuality(0f))
     }
 
     // ── Speed tiers from fastest to slowest ──────────────────────────────────
 
     @Test
-    fun `very fast speed above 1000 returns 95`() {
-        assertEquals(95, ScreenCaptureService.computeAutoQuality(1500f))
-        assertEquals(95, ScreenCaptureService.computeAutoQuality(1001f))
+    fun `very fast speed above 1000 returns 50`() {
+        assertEquals(50, ScreenCaptureService.computeAutoQuality(1500f))
+        assertEquals(50, ScreenCaptureService.computeAutoQuality(1001f))
     }
 
     @Test
-    fun `fast speed 801-1000 returns 90`() {
-        assertEquals(90, ScreenCaptureService.computeAutoQuality(1000f))
-        assertEquals(90, ScreenCaptureService.computeAutoQuality(801f))
+    fun `fast speed 601-1000 returns 40`() {
+        assertEquals(40, ScreenCaptureService.computeAutoQuality(1000f))
+        assertEquals(40, ScreenCaptureService.computeAutoQuality(601f))
     }
 
     @Test
-    fun `good speed 601-800 returns 85`() {
-        assertEquals(85, ScreenCaptureService.computeAutoQuality(800f))
-        assertEquals(85, ScreenCaptureService.computeAutoQuality(601f))
+    fun `average speed 301-600 returns 30`() {
+        assertEquals(30, ScreenCaptureService.computeAutoQuality(600f))
+        assertEquals(30, ScreenCaptureService.computeAutoQuality(301f))
     }
 
     @Test
-    fun `above average speed 401-600 returns 80`() {
-        assertEquals(80, ScreenCaptureService.computeAutoQuality(600f))
-        assertEquals(80, ScreenCaptureService.computeAutoQuality(401f))
+    fun `slow speed 151-300 returns 25`() {
+        assertEquals(25, ScreenCaptureService.computeAutoQuality(300f))
+        assertEquals(25, ScreenCaptureService.computeAutoQuality(151f))
     }
 
     @Test
-    fun `average speed 301-400 returns 75`() {
-        assertEquals(75, ScreenCaptureService.computeAutoQuality(400f))
-        assertEquals(75, ScreenCaptureService.computeAutoQuality(301f))
+    fun `very slow speed 51-150 returns 20`() {
+        assertEquals(20, ScreenCaptureService.computeAutoQuality(150f))
+        assertEquals(20, ScreenCaptureService.computeAutoQuality(51f))
     }
 
     @Test
-    fun `below average speed 201-300 returns 65`() {
-        assertEquals(65, ScreenCaptureService.computeAutoQuality(300f))
-        assertEquals(65, ScreenCaptureService.computeAutoQuality(201f))
-    }
-
-    @Test
-    fun `slow speed 151-200 returns 55`() {
-        assertEquals(55, ScreenCaptureService.computeAutoQuality(200f))
-        assertEquals(55, ScreenCaptureService.computeAutoQuality(151f))
-    }
-
-    @Test
-    fun `very slow speed 101-150 returns 45`() {
-        assertEquals(45, ScreenCaptureService.computeAutoQuality(150f))
-        assertEquals(45, ScreenCaptureService.computeAutoQuality(101f))
-    }
-
-    @Test
-    fun `extremely slow speed 51-100 returns 35`() {
-        assertEquals(35, ScreenCaptureService.computeAutoQuality(100f))
-        assertEquals(35, ScreenCaptureService.computeAutoQuality(51f))
-    }
-
-    @Test
-    fun `minimal quality for very poor speed below 50 returns 25`() {
-        assertEquals(25, ScreenCaptureService.computeAutoQuality(50f))
-        assertEquals(25, ScreenCaptureService.computeAutoQuality(10f))
-        assertEquals(25, ScreenCaptureService.computeAutoQuality(1f))
+    fun `minimal quality for very poor speed below or equal 50 returns 15`() {
+        assertEquals(15, ScreenCaptureService.computeAutoQuality(50f))
+        assertEquals(15, ScreenCaptureService.computeAutoQuality(10f))
+        assertEquals(15, ScreenCaptureService.computeAutoQuality(1f))
     }
 
     // ── Boundary precision ───────────────────────────────────────────────────
@@ -104,6 +80,6 @@ class ScreenCaptureQualityTest {
 
     @Test
     fun `negative speed treated as very poor connection`() {
-        assertEquals(25, ScreenCaptureService.computeAutoQuality(-1f))
+        assertEquals(15, ScreenCaptureService.computeAutoQuality(-1f))
     }
 }

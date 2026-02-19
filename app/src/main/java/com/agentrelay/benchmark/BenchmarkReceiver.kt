@@ -69,18 +69,36 @@ class BenchmarkReceiver : BroadcastReceiver() {
 
     private fun handleConfigure(context: Context, intent: Intent) {
         val apiKey = intent.getStringExtra("api_key")
+        val geminiKey = intent.getStringExtra("gemini_api_key")
+        val openaiKey = intent.getStringExtra("openai_api_key")
         val model = intent.getStringExtra("model")
 
         val secureStorage = SecureStorage.getInstance(context)
 
         if (!apiKey.isNullOrBlank()) {
             secureStorage.saveClaudeApiKey(apiKey)
-            Log.d(TAG, "API key configured")
+            Log.d(TAG, "Claude API key configured")
+        }
+
+        if (!geminiKey.isNullOrBlank()) {
+            secureStorage.saveGeminiApiKey(geminiKey)
+            Log.d(TAG, "Gemini API key configured")
+        }
+
+        if (!openaiKey.isNullOrBlank()) {
+            secureStorage.saveOpenAIApiKey(openaiKey)
+            Log.d(TAG, "OpenAI API key configured")
         }
 
         if (!model.isNullOrBlank()) {
             secureStorage.saveModel(model)
             Log.d(TAG, "Model configured: $model")
+        }
+
+        val planningModel = intent.getStringExtra("planning_model")
+        if (!planningModel.isNullOrBlank()) {
+            secureStorage.savePlanningModel(planningModel)
+            Log.d(TAG, "Planning model configured: $planningModel")
         }
     }
 }

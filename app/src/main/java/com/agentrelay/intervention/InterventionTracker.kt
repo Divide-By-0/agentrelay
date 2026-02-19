@@ -203,6 +203,47 @@ class InterventionTracker private constructor(private val context: Context) {
         return dp[m][n]
     }
 
+    // ── Agent Trace Logging ──
+
+    fun logTrace(
+        eventType: String,
+        description: String,
+        action: String? = null,
+        elementId: String? = null,
+        reasoning: String? = null,
+        confidence: String? = null,
+        iteration: Int = 0,
+        stepIndex: Int = 0,
+        success: Boolean = true,
+        failureReason: String? = null,
+        planSteps: String? = null
+    ) {
+        scope.launch {
+            try {
+                db.agentTraceDao().insert(
+                    AgentTraceEvent(
+                        taskDescription = taskDescription,
+                        eventType = eventType,
+                        action = action,
+                        elementId = elementId,
+                        description = description,
+                        reasoning = reasoning,
+                        confidence = confidence,
+                        currentApp = currentApp,
+                        currentAppPackage = currentAppPackage,
+                        iteration = iteration,
+                        stepIndex = stepIndex,
+                        success = success,
+                        failureReason = failureReason,
+                        planSteps = planSteps
+                    )
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to save trace event", e)
+            }
+        }
+    }
+
     companion object {
         private const val TAG = "InterventionTracker"
 

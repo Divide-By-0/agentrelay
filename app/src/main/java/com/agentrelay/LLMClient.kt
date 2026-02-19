@@ -55,7 +55,8 @@ abstract class LLMClient(
         conversationHistory: List<Message>,
         deviceContext: DeviceContext? = null,
         peerFindings: Map<String, String>? = null,
-        previousElementMapText: String? = null
+        previousElementMapText: String? = null,
+        isFirstCall: Boolean = false
     ): Result<SemanticActionPlan> {
         val elementMapText = elementMap.toTextRepresentation()
         val deviceContextText = deviceContext?.toPromptText() ?: ""
@@ -81,16 +82,18 @@ abstract class LLMClient(
 
             Respond with a JSON object containing:
             - "steps": array of action objects, each with:
-              - "action": one of "click", "long_press", "type", "swipe", "back", "home", "wait", "complete", "open_app", "dismiss_keyboard"
+              - "action": one of "click", "long_press", "type", "swipe", "back", "home", "wait", "complete", "open_app", "dismiss_keyboard", "press_enter", "extract"
               - "element": element ID from the map (e.g. "btn_search", "input_query") — required for click/type/long_press. IDs are semantic: type prefix + text slug.
               - "text": text to type (for type action only)
               - "direction": "up", "down", "left", "right" (for swipe only)
               - "duration_ms": hold duration in milliseconds for long_press (default 1000)
               - "package": package name of the app to open (for open_app only) — MUST be copied EXACTLY from the "Installed apps" list in device context. NEVER guess package names.
+              - "extract_query": a question about the screen content (for extract only). Result available next iteration.
               - "description": brief description (3-7 words)
             - "reasoning": brief explanation of your plan
             - "confidence": "high", "medium", or "low" — how confident you are this plan will work
-            - "progress": 1-2 sentence assessment of overall task progress. Say what's been done so far, what's left, and flag anything that went wrong or might be tricky. Be honest — if something failed or you're unsure, say so.
+            - "progress": 1-2 sentence assessment of overall task progress. Say what's been done so far, what's left, and flag anything that went wrong or might be tricky. Be honest — if something failed or you're unsure, say so.${if (isFirstCall) """
+            - "relevant_apps": array of package name strings from the installed apps list that MIGHT be needed for ANY step of this task. Include the primary app plus any helpers (e.g. browser, settings, file manager). This field is REQUIRED on the first response only. Be generous — include anything potentially useful.""" else ""}
 
             Example response:
             {"steps": [{"action": "open_app", "package": "com.google.android.gm", "description": "Open Gmail app"}, {"action": "click", "element": "btn_compose", "description": "Tap compose button"}], "reasoning": "Opening Gmail to compose email", "confidence": "high", "progress": "Starting task — need to open Gmail and compose a new email."}
@@ -100,7 +103,7 @@ abstract class LLMClient(
             2. Reference elements by their IDs from the element map
             3. MAXIMIZE STEPS PER PLAN: Each API round-trip costs ~4 seconds. Return as many steps as you can confidently predict will succeed. Chain obvious follow-ups: after typing a URL, include a click on the Go/autocomplete suggestion; after typing in a search field, include clicking the search button or first result; after opening an app, include the first navigation action. Don't stop at a single step when the next action is predictable from the current screen state.
             4. For click/type, the "element" field is REQUIRED — ONLY use IDs that exist in the element map above. Do NOT guess or fabricate IDs.
-            5. ONLY use "complete" when the ENTIRE user task is fully finished — not after a single sub-step. For multi-part tasks (e.g. "open X and do Y"), completing the first part does NOT mean the task is done. Keep going until every part of the request is satisfied.
+            5. ONLY use "complete" when the ENTIRE user task is fully finished — not after a single sub-step. For multi-part tasks (e.g. "open X and do Y"), completing the first part does NOT mean the task is done. Keep going until every part of the request is satisfied. CRITICAL: "complete" must be the ONLY step in a plan. NEVER combine "complete" with other actions (click, type, swipe, etc.) in the same response. After performing an action that should finish the task (e.g. clicking "Send"), return ONLY that action. On the NEXT iteration, once you can SEE the result on screen confirming success, THEN return "complete" alone.
             6. WHEN STUCK or an action doesn't seem to work, STOP and DIAGNOSE before retrying. Consider these specific causes:
                a. WRONG BUTTON — There may be MULTIPLE elements with similar text (e.g., two "Save" buttons, a section header vs. the real button, a disabled vs. enabled copy). Carefully scan ALL elements and pick the correct one.
                b. KEYBOARD BLOCKING — The soft keyboard may be covering the button/field you need. Use "dismiss_keyboard" first, then re-examine what's visible.
@@ -117,14 +120,17 @@ abstract class LLMClient(
             10. CORRECTNESS IS CRITICAL: When selecting a contact, recipient, or item from a list, VERIFY the name/text matches EXACTLY. If multiple similar options exist, prefer using search/autofill to narrow results rather than blindly tapping. For contacts, type the person's name in the search/To field and wait for autocomplete suggestions before selecting.
             11. When the task involves sending a message, email, or performing an action targeting a specific person/item, use the search field or "To" field to type their name. Then select from the autocomplete/suggestion results to ensure accuracy. Do NOT scroll through a long list guessing — always search first.
             12. If you cannot find the exact target (contact, app, setting, etc.), try these strategies in order: (a) use the search bar if one exists, (b) swipe to find it, (c) go back and try an alternative path. Only report failure after exhausting these options.
-            15. ELEMENT MISCLASSIFICATION: The element map may not perfectly classify every element. A "TEXT" element might be tappable (links, labels acting as buttons). An "IMAGE" might be an icon button. A "SWITCH" might be labeled as a "CHECKBOX". If you can't find an element by its expected type, look for ANY element with matching or similar text and try clicking it — the type classification is a hint, not a guarantee.
-            13. APP TARGETING: Before performing any task, CHECK the "Current app" in device context. If you're not in the correct app for the task, your FIRST step MUST be "open_app" with the correct package name from the installed apps list. CRITICAL: You MUST use ONLY package names that appear in the "Installed apps" list in device context — NEVER guess or fabricate a package name. App package names are often non-obvious (e.g., Temu is "com.einnovation.temu", not "com.temu"). If you cannot find the app in the installed list, fall back to tapping its icon on the home screen instead of guessing a package name.
-            14. APP VERIFICATION: After every action, the system verifies you're still in the target app. If you get redirected to a different app unexpectedly, use open_app to return. Never assume you're in the right app — always check the device context.
-            16. NEVER HALLUCINATE DATA: Do NOT fabricate, guess, or make up email addresses, phone numbers, usernames, or any contact information. ONLY use information that is: (a) explicitly provided in the user's task, (b) visible on the current screen, or (c) found through search/autocomplete on the device. If the task says "email John" but no email address is provided, you MUST search for John in the contacts or app first — NEVER invent an email like "john@gmail.com".
-            17. SELF-APP AVOIDANCE: You are controlling the device from "com.agentrelay". NEVER interact with the agentrelay app UI. If device context shows current app is "com.agentrelay", your first action MUST be "open_app" or "home" to navigate away.
-            18. DIRECT NAVIGATION OVER SEARCH: When the task involves visiting a website or looking up information online, navigate DIRECTLY to the target website by typing the URL in the browser's address bar (e.g., "amazon.com", "weather.com") instead of going to Google and searching. Prefer using installed native apps (e.g., Amazon app, news apps) over the browser when available. Only fall back to Google search when you genuinely don't know which website has the information needed.
-            19. CLEAR BEFORE TYPING: When you need to type into a field that ALREADY contains text (visible in the element map as an INPUT with existing text), you MUST clear the field first. Use "click" on the field, then "type" with your new text — the system will select-all and replace. Do NOT assume your text will replace existing content automatically. If the field shows old/wrong text, always click it first to focus, then type the new text.
-            20. AVOID ADS AND SPONSORED CONTENT: Do NOT click elements labeled "Sponsored", "Ad", "Promoted", or promotional content unless the user specifically asked to interact with ads. Prefer organic/non-sponsored results. In search results, scroll past sponsored sections to find real results. Sponsored results often lead to irrelevant websites.
+            13. After TYPE, when the flow likely needs submit/next (search bars, login forms, message send fields), use "press_enter" to trigger the keyboard enter/go/next key instead of typing a newline character.
+            14. ELEMENT MISCLASSIFICATION: The element map may not perfectly classify every element. A "TEXT" element might be tappable (links, labels acting as buttons). An "IMAGE" might be an icon button. A "SWITCH" might be labeled as a "CHECKBOX". If you can't find an element by its expected type, look for ANY element with matching or similar text and try clicking it — the type classification is a hint, not a guarantee.
+            15. APP TARGETING: Before performing any task, CHECK the "Current app" in device context. If you're not in the correct app for the task, your FIRST step MUST be "open_app" with the correct package name from the installed apps list. CRITICAL: You MUST use ONLY package names that appear in the "Installed apps" list in device context — NEVER guess or fabricate a package name. App package names are often non-obvious (e.g., Temu is "com.einnovation.temu", not "com.temu"). If you cannot find the app in the installed list, fall back to tapping its icon on the home screen instead of guessing a package name.
+            16. APP VERIFICATION: After every action, the system verifies you're still in the target app. If you get redirected to a different app unexpectedly, use open_app to return. Never assume you're in the right app — always check the device context.
+            17. NEVER HALLUCINATE DATA: Do NOT fabricate, guess, or make up email addresses, phone numbers, usernames, or any contact information. ONLY use information that is: (a) explicitly provided in the user's task, (b) visible on the current screen, or (c) found through search/autocomplete on the device. If the task says "email John" but no email address is provided, you MUST search for John in the contacts or app first — NEVER invent an email like "john@gmail.com".
+            18. SELF-APP AVOIDANCE: You are controlling the device from "com.agentrelay". NEVER interact with the agentrelay app UI. If device context shows current app is "com.agentrelay", your first action MUST be "open_app" or "home" to navigate away.
+            19. DIRECT NAVIGATION OVER SEARCH: When the task involves visiting a website or looking up information online, navigate DIRECTLY to the target website by typing the URL in the browser's address bar (e.g., "amazon.com", "weather.com") instead of going to Google and searching. Prefer using installed native apps (e.g., Amazon app, news apps) over the browser when available. Only fall back to Google search when you genuinely don't know which website has the information needed.
+            20. CLEAR BEFORE TYPING: When you need to type into a field that ALREADY contains text (visible in the element map as an INPUT with existing text), you MUST clear the field first. Use "click" on the field, then "type" with your new text — the system will select-all and replace. Do NOT assume your text will replace existing content automatically. If the field shows old/wrong text, always click it first to focus, then type the new text.
+            21. AVOID ADS AND SPONSORED CONTENT: Do NOT click elements labeled "Sponsored", "Ad", "Promoted", or promotional content unless the user specifically asked to interact with ads. Prefer organic/non-sponsored results. In search results, scroll past sponsored sections to find real results. Sponsored results often lead to irrelevant websites.
+            22. CLICK VISIBLE TARGETS BEFORE SCROLLING: Before issuing a swipe/scroll, SCAN the entire element map for clickable elements that match your current goal. If a button, link, or actionable element relevant to the task is ALREADY VISIBLE in the element map (e.g., "Pay now", "Submit", "Next", "Continue"), CLICK IT IMMEDIATELY — do NOT scroll past it. Only scroll when the target element is genuinely not present in the current element map.
+            23. EXTRACT FOR INFORMATION: Use "extract" when you need to understand screen content (prices, names, counts, status text) before deciding your next action. Provide "extract_query" with a specific question. The answer will be available in the next iteration. Use extract as the LAST step in your plan — don't combine it with other actions after it. Example: {"action": "extract", "extract_query": "What is the total price shown?", "description": "Check total price"}
 
             ${if (!peerFindings.isNullOrEmpty()) {
                 buildString {
@@ -205,9 +211,18 @@ abstract class LLMClient(
                     "complete" -> SemanticAction.COMPLETE
                     "open_app" -> SemanticAction.OPEN_APP
                     "dismiss_keyboard" -> SemanticAction.DISMISS_KEYBOARD
+                    "press_enter" -> SemanticAction.PRESS_ENTER
                     "share_finding" -> SemanticAction.SHARE_FINDING
+                    "extract" -> SemanticAction.EXTRACT
                     else -> {
                         Log.w(TAG, "Unknown action '$actionStr' from model; coercing to WAIT")
+                        ConversationHistoryManager.add(
+                            ConversationItem(
+                                timestamp = System.currentTimeMillis(),
+                                type = ConversationItem.ItemType.ERROR,
+                                status = "Unknown action '$actionStr' from LLM — coerced to WAIT"
+                            )
+                        )
                         SemanticAction.WAIT
                     }
                 }
@@ -220,21 +235,34 @@ abstract class LLMClient(
                     durationMs = step.get("duration_ms")?.asLong,
                     description = step.get("description")?.asString ?: "",
                     findingKey = step.get("finding_key")?.asString,
-                    findingValue = step.get("finding_value")?.asString
+                    findingValue = step.get("finding_value")?.asString,
+                    extractQuery = step.get("extract_query")?.asString
                 )
             }
 
             val confidence = json.get("confidence")?.asString ?: ""
             val progress = json.get("progress")?.asString ?: ""
+            val relevantApps = json.getAsJsonArray("relevant_apps")
+                ?.map { it.asString }
+                ?: emptyList()
 
             SemanticActionPlan(
                 steps = steps,
                 reasoning = reasoning,
                 confidence = confidence,
-                progressAssessment = progress
+                progressAssessment = progress,
+                relevantApps = relevantApps
             )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse semantic plan from: $jsonText", e)
+            ConversationHistoryManager.add(
+                ConversationItem(
+                    timestamp = System.currentTimeMillis(),
+                    type = ConversationItem.ItemType.ERROR,
+                    status = "Failed to parse LLM response: ${e.message?.take(120)}",
+                    response = jsonText.take(500)
+                )
+            )
             SemanticActionPlan(
                 steps = listOf(
                     SemanticStep(

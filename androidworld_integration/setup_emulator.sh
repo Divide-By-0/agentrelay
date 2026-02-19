@@ -4,12 +4,14 @@
 #
 # Usage:
 #   API_KEY=sk-ant-... MODEL=claude-sonnet-4-5-20250929 ./setup_emulator.sh
+#   GEMINI_API_KEY=AIza... can also be set for Gemini model support.
 
 set -euo pipefail
 
 PACKAGE="com.agentrelay"
 APK_PATH="${APK_PATH:-../app/build/outputs/apk/debug/app-debug.apk}"
 API_KEY="${API_KEY:?Set API_KEY environment variable}"
+GEMINI_KEY="${GEMINI_API_KEY:-}"
 MODEL="${MODEL:-claude-sonnet-4-5-20250929}"
 
 echo "=== Agent Relay AndroidWorld Setup ==="
@@ -31,18 +33,27 @@ adb shell appops set "$PACKAGE" SYSTEM_ALERT_WINDOW allow
 echo "[4/6] Launching app for screen capture setup..."
 adb shell am start -n "$PACKAGE/.MainActivity"
 sleep 3
-# Auto-accept the screen capture dialog (coordinates may vary by device/emulator)
+# Auto-accept the screen capture dialog
+# Coordinates target the "Start now" button on the MediaProjection dialog
+# These may vary by device resolution — 1080x2400 @ 420dpi assumed
 echo "  Attempting to auto-accept screen capture dialog..."
-adb shell input tap 540 1400
+adb shell input tap 854 1550
+sleep 2
+# Also handle the notification permission dialog that may follow
+echo "  Attempting to auto-accept notification permission..."
+adb shell input tap 540 1303
 sleep 2
 
-# 5. Configure API key and model via broadcast
-echo "[5/6] Configuring API key and model..."
+# 5. Configure API keys and model via broadcast
+echo "[5/6] Configuring API keys and model..."
+CONFIGURE_EXTRAS="--es api_key $API_KEY --es model $MODEL"
+if [[ -n "$GEMINI_KEY" ]]; then
+    CONFIGURE_EXTRAS="$CONFIGURE_EXTRAS --es gemini_api_key $GEMINI_KEY"
+fi
 adb shell am broadcast \
     -n "$PACKAGE/$PACKAGE.benchmark.BenchmarkReceiver" \
     -a com.agentrelay.benchmark.CONFIGURE \
-    --es api_key "$API_KEY" \
-    --es model "$MODEL"
+    $CONFIGURE_EXTRAS
 
 # 6. Go home
 echo "[6/6] Returning to home screen..."

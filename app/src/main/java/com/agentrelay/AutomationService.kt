@@ -2,8 +2,10 @@ package com.agentrelay
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.ComponentName
 import android.content.Context
 import android.graphics.Path
+import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.os.Bundle
@@ -419,6 +421,55 @@ class AutomationService : AccessibilityService() {
         return performGlobalAction(GLOBAL_ACTION_BACK)
     }
 
+    /**
+     * Presses keyboard enter/go/next key.
+     * Tries focused node IME action first, then taps bottom-right keyboard area.
+     */
+    suspend fun pressKeyboardEnter(): Boolean {
+        // First try focused-node IME enter action (best signal-preserving path).
+        val focused = findFocusedInputNode()
+        if (focused != null) {
+            try {
+                val imeActionOk = try {
+                    focused.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+                } catch (_: Exception) {
+                    false
+                }
+                if (imeActionOk) {
+                    Log.d(TAG, "Pressed keyboard enter via ACTION_IME_ENTER")
+                    return true
+                }
+            } finally {
+                focused.recycle()
+            }
+        }
+
+        // Fallback: tap the keyboard's bottom-right action-key area.
+        if (!isKeyboardShowing()) {
+            Log.w(TAG, "pressKeyboardEnter requested but keyboard is not visible")
+            return false
+        }
+        return try {
+            val windowManager = getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
+            val (w, h) = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                val b = windowManager.currentWindowMetrics.bounds
+                b.width() to b.height()
+            } else {
+                val metrics = android.util.DisplayMetrics()
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay.getRealMetrics(metrics)
+                metrics.widthPixels to metrics.heightPixels
+            }
+            val x = (w * 0.92f).toInt()
+            val y = (h * 0.94f).toInt()
+            Log.d(TAG, "Pressing keyboard enter fallback tap at ($x, $y)")
+            performTap(x, y)
+        } catch (e: Exception) {
+            Log.w(TAG, "pressKeyboardEnter fallback tap failed", e)
+            false
+        }
+    }
+
     fun getRootNode(): AccessibilityNodeInfo? {
         return try {
             rootInActiveWindow
@@ -558,6 +609,27 @@ class AutomationService : AccessibilityService() {
             private set
 
         fun isServiceEnabled(): Boolean = instance != null
+
+        fun isServiceEnabledInSettings(context: Context): Boolean {
+            return try {
+                val enabled = Settings.Secure.getInt(
+                    context.contentResolver,
+                    Settings.Secure.ACCESSIBILITY_ENABLED,
+                    0
+                ) == 1
+                if (!enabled) return false
+
+                val expected = ComponentName(context, AutomationService::class.java).flattenToString()
+                val enabledServices = Settings.Secure.getString(
+                    context.contentResolver,
+                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+                ) ?: return false
+                enabledServices.split(':').any { it.equals(expected, ignoreCase = true) }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to check accessibility settings state", e)
+                false
+            }
+        }
     }
 }
 

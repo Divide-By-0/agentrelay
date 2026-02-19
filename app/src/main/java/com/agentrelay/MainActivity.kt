@@ -45,11 +45,14 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.Canvas
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.core.app.ActivityCompat
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -75,6 +78,9 @@ private val IOSSeparator = Color(0xFF3C3C43).copy(alpha = 0.12f)
 class MainActivity : ComponentActivity() {
 
     private val screenCaptureRequestCode = 100
+    internal companion object {
+        const val REQUEST_CODE_AUDIO_PERMISSION = 200
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -142,6 +148,19 @@ class MainActivity : ComponentActivity() {
             }
             startForegroundService(intent)
             Toast.makeText(this, "Screen capture enabled!", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_CODE_AUDIO_PERMISSION) {
+            if (grantResults.isNotEmpty() && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                SecureStorage.getInstance(this).setWakeWordEnabled(true)
+                VoiceCommandService.getInstance(this).start()
+                Toast.makeText(this, "Wake word enabled!", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Microphone permission required for wake word", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 }
@@ -1420,7 +1439,7 @@ fun SettingsTab(
                 "gpt-4o-mini" to "GPT-4o Mini",
                 "gpt-4o" to "GPT-4o",
                 "gemini-2.5-pro" to "Gemini 2.5 Pro",
-                "gemini-3.0-flash" to "Gemini 3.0 Flash"
+                "gemini-2.5-flash" to "Gemini 2.5 Flash"
             )
 
             fastModelOptions.forEachIndexed { index, (modelId, modelName) ->
@@ -1457,7 +1476,7 @@ fun SettingsTab(
             var selectedThinkingModel by remember { mutableStateOf(secureStorage.getPlanningModel()) }
             val thinkingModelOptions = listOf(
                 "claude-opus-4-6" to "Claude Opus 4.6",
-                "claude-sonnet-4-5" to "Claude Sonnet 4.5",
+                "claude-sonnet-4-6" to "Claude Sonnet 4.6",
                 "gpt-4.1" to "GPT-4.1",
                 "gpt-4o" to "GPT-4o",
                 "o4-mini" to "o4-mini",
@@ -1498,7 +1517,7 @@ fun SettingsTab(
             var selectedQuality by remember { mutableStateOf(secureStorage.getScreenshotQuality()) }
             val qualityOptions = listOf(
                 -1 to "Auto",
-                3 to "Low (fastest, smallest)",
+                15 to "Low (fastest, smallest)",
                 30 to "Medium"
             )
 
@@ -1564,23 +1583,81 @@ fun SettingsTab(
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        // ── Voice Control Section ──
+        IOSSectionHeader("VOICE CONTROL")
+        IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+            var wakeWordEnabled by remember { mutableStateOf(secureStorage.getWakeWordEnabled()) }
+            val activity = context as? Activity
+
+            IOSSettingsRow(
+                icon = Icons.Default.Mic,
+                iconBackground = Color(0xFFFF9500),
+                title = "Wake Word",
+                subtitle = if (wakeWordEnabled) "Say 'Hey Relay' to start a task" else "Disabled",
+                trailing = {
+                    Switch(
+                        checked = wakeWordEnabled,
+                        onCheckedChange = { enabled ->
+                            if (enabled) {
+                                // Check RECORD_AUDIO permission
+                                val hasPermission = context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+                                    android.content.pm.PackageManager.PERMISSION_GRANTED
+                                if (hasPermission) {
+                                    wakeWordEnabled = true
+                                    secureStorage.setWakeWordEnabled(true)
+                                    VoiceCommandService.getInstance(context).start()
+                                } else {
+                                    // Request permission
+                                    activity?.let {
+                                        ActivityCompat.requestPermissions(
+                                            it,
+                                            arrayOf(Manifest.permission.RECORD_AUDIO),
+                                            MainActivity.REQUEST_CODE_AUDIO_PERMISSION
+                                        )
+                                    }
+                                }
+                            } else {
+                                wakeWordEnabled = false
+                                secureStorage.setWakeWordEnabled(false)
+                                VoiceCommandService.getInstance(context).stop()
+                            }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = IOSGreen
+                        )
+                    )
+                }
+            )
+        }
+        Text(
+            "Continuously listens for 'Hey Relay' to start voice task input. Requires microphone permission.",
+            fontSize = 13.sp,
+            color = IOSSecondaryLabel,
+            modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 6.dp),
+            lineHeight = 18.sp
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
         // ── Agent Behavior Section ──
+        val agentCoroutineScope = rememberCoroutineScope()
+        var interventionCount by remember { mutableStateOf<Int?>(null) }
+
+        // Load intervention count
+        LaunchedEffect(Unit) {
+            withContext(Dispatchers.IO) {
+                try {
+                    val db = com.agentrelay.intervention.InterventionDatabase.getInstance(context)
+                    interventionCount = db.interventionDao().getCount()
+                } catch (_: Exception) {}
+            }
+        }
+
         IOSSectionHeader("AGENT BEHAVIOR")
         IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
             var blockTouchEnabled by remember { mutableStateOf(secureStorage.getBlockTouchDuringAgent()) }
             var interventionTrackingEnabled by remember { mutableStateOf(secureStorage.getInterventionTrackingEnabled()) }
-            val coroutineScope = rememberCoroutineScope()
-            var interventionCount by remember { mutableStateOf<Int?>(null) }
-
-            // Load intervention count
-            LaunchedEffect(Unit) {
-                withContext(Dispatchers.IO) {
-                    try {
-                        val db = com.agentrelay.intervention.InterventionDatabase.getInstance(context)
-                        interventionCount = db.interventionDao().getCount()
-                    } catch (_: Exception) {}
-                }
-            }
 
             IOSSettingsRow(
                 icon = Icons.Default.TouchApp,
@@ -1624,43 +1701,195 @@ fun SettingsTab(
                 }
             )
 
-            Divider(color = IOSSeparator, modifier = Modifier.padding(start = 58.dp))
+        }
 
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // ── Agent Log (unified trace + interventions) ──
+        var logExpanded by remember { mutableStateOf(false) }
+        var logFilter by remember { mutableStateOf("all") } // "all", "trace", "interventions"
+        var traceEvents by remember { mutableStateOf<List<com.agentrelay.intervention.AgentTraceEvent>>(emptyList()) }
+        var interventionEvents by remember { mutableStateOf<List<com.agentrelay.intervention.UserIntervention>>(emptyList()) }
+        var traceCount by remember { mutableStateOf(0) }
+
+        IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
             IOSSettingsRow(
-                icon = Icons.Default.Analytics,
+                icon = Icons.Default.Timeline,
                 iconBackground = IOSOrange,
-                title = "Interventions",
-                subtitle = "${interventionCount ?: 0} recorded",
+                title = "Agent Log",
+                subtitle = "${interventionCount ?: 0} interventions · $traceCount trace events",
                 trailing = {
-                    Text(
-                        "Export",
-                        color = IOSBlue,
-                        fontSize = 15.sp,
-                        modifier = Modifier.clickable {
-                            coroutineScope.launch {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Export",
+                            color = IOSBlue,
+                            fontSize = 15.sp,
+                            modifier = Modifier.clickable {
+                                agentCoroutineScope.launch {
+                                    try {
+                                        val db = com.agentrelay.intervention.InterventionDatabase.getInstance(context)
+                                        val interventions = withContext(Dispatchers.IO) { db.interventionDao().exportAll() }
+                                        val traces = withContext(Dispatchers.IO) { db.agentTraceDao().exportAll() }
+                                        val gson = com.google.gson.Gson()
+                                        val exportData = mapOf("interventions" to interventions, "trace" to traces)
+                                        val json = gson.toJson(exportData)
+                                        val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(
+                                            android.os.Environment.DIRECTORY_DOWNLOADS
+                                        )
+                                        val file = java.io.File(downloadsDir, "agent_log_${System.currentTimeMillis()}.json")
+                                        file.writeText(json)
+                                        Toast.makeText(context, "Exported ${interventions.size + traces.size} events to Downloads", Toast.LENGTH_LONG).show()
+                                    } catch (e: Exception) {
+                                        Toast.makeText(context, "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Icon(
+                            Icons.Default.ExpandMore,
+                            contentDescription = if (logExpanded) "Collapse" else "Expand",
+                            tint = IOSGray2,
+                            modifier = Modifier
+                                .size(24.dp)
+                                .rotate(if (logExpanded) 180f else 0f)
+                        )
+                    }
+                },
+                onClick = {
+                    logExpanded = !logExpanded
+                    if (logExpanded) {
+                        agentCoroutineScope.launch {
+                            withContext(Dispatchers.IO) {
                                 try {
                                     val db = com.agentrelay.intervention.InterventionDatabase.getInstance(context)
-                                    val allData = withContext(Dispatchers.IO) { db.interventionDao().exportAll() }
-                                    val gson = com.google.gson.Gson()
-                                    val json = gson.toJson(allData)
-                                    // Save to Downloads
-                                    val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(
-                                        android.os.Environment.DIRECTORY_DOWNLOADS
+                                    interventionEvents = db.interventionDao().getRecent(100)
+                                    traceEvents = db.agentTraceDao().getRecent(200)
+                                    traceCount = db.agentTraceDao().getCount()
+                                } catch (_: Exception) {}
+                            }
+                        }
+                    }
+                }
+            )
+
+            // Load counts on first render
+            LaunchedEffect(Unit) {
+                withContext(Dispatchers.IO) {
+                    try {
+                        val db = com.agentrelay.intervention.InterventionDatabase.getInstance(context)
+                        traceCount = db.agentTraceDao().getCount()
+                    } catch (_: Exception) {}
+                }
+            }
+
+            if (logExpanded) {
+                Column(modifier = Modifier.animateContentSize()) {
+                    // Filter tabs
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf("all" to "All", "trace" to "Trace", "interventions" to "Interventions").forEach { (key, label) ->
+                            val selected = logFilter == key
+                            Text(
+                                label,
+                                fontSize = 13.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (selected) Color.White else IOSBlue,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(if (selected) IOSBlue else IOSBlue.copy(alpha = 0.1f))
+                                    .clickable { logFilter = key }
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+
+                    // Build unified timeline
+                    data class TimelineItem(
+                        val timestamp: Long,
+                        val intervention: com.agentrelay.intervention.UserIntervention? = null,
+                        val trace: com.agentrelay.intervention.AgentTraceEvent? = null
+                    )
+
+                    val timelineItems = remember(logFilter, interventionEvents, traceEvents) {
+                        val items = mutableListOf<TimelineItem>()
+                        if (logFilter != "trace") {
+                            interventionEvents.forEach { items.add(TimelineItem(it.timestamp, intervention = it)) }
+                        }
+                        if (logFilter != "interventions") {
+                            traceEvents.forEach { items.add(TimelineItem(it.timestamp, trace = it)) }
+                        }
+                        items.sortedByDescending { it.timestamp }
+                    }
+
+                    if (timelineItems.isEmpty()) {
+                        Text(
+                            "No events recorded yet",
+                            fontSize = 14.sp,
+                            color = IOSSecondaryLabel,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            textAlign = TextAlign.Center
+                        )
+                    } else {
+                        val dateFormat = remember { java.text.SimpleDateFormat("MMM d, h:mm:ss a", java.util.Locale.getDefault()) }
+                        Column(
+                            modifier = Modifier
+                                .heightIn(max = 500.dp)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            timelineItems.forEachIndexed { index, item ->
+                                if (item.intervention != null) {
+                                    InterventionRow(
+                                        intervention = item.intervention,
+                                        dateFormat = dateFormat,
+                                        onDelete = {
+                                            agentCoroutineScope.launch {
+                                                withContext(Dispatchers.IO) {
+                                                    try {
+                                                        val db = com.agentrelay.intervention.InterventionDatabase.getInstance(context)
+                                                        db.interventionDao().deleteById(item.intervention.id)
+                                                    } catch (_: Exception) {}
+                                                }
+                                                interventionEvents = interventionEvents.filter { it.id != item.intervention.id }
+                                                interventionCount = (interventionCount ?: 1) - 1
+                                            }
+                                        }
                                     )
-                                    val file = java.io.File(downloadsDir, "interventions_${System.currentTimeMillis()}.json")
-                                    file.writeText(json)
-                                    Toast.makeText(context, "Exported ${allData.size} interventions to Downloads", Toast.LENGTH_LONG).show()
-                                } catch (e: Exception) {
-                                    Toast.makeText(context, "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                                } else if (item.trace != null) {
+                                    TraceEventRow(
+                                        event = item.trace,
+                                        dateFormat = dateFormat,
+                                        onDelete = {
+                                            agentCoroutineScope.launch {
+                                                withContext(Dispatchers.IO) {
+                                                    try {
+                                                        val db = com.agentrelay.intervention.InterventionDatabase.getInstance(context)
+                                                        db.agentTraceDao().deleteById(item.trace.id)
+                                                    } catch (_: Exception) {}
+                                                }
+                                                traceEvents = traceEvents.filter { it.id != item.trace.id }
+                                                traceCount = maxOf(0, traceCount - 1)
+                                            }
+                                        }
+                                    )
+                                }
+                                if (index < timelineItems.lastIndex) {
+                                    Divider(color = IOSSeparator, modifier = Modifier.padding(start = 16.dp))
                                 }
                             }
                         }
-                    )
+                    }
                 }
-            )
+            }
         }
         Text(
-            "Block touch prevents accidental taps during agent runs. Intervention tracking records user corrections for training data.",
+            "Unified log of agent trace events (planning, steps, errors) and user interventions. Swipe left to delete entries.",
             fontSize = 13.sp,
             color = IOSSecondaryLabel,
             modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 6.dp),
@@ -1752,7 +1981,7 @@ fun SettingsTab(
         IOSSectionHeader("SEMANTIC PIPELINE")
         IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
             var verificationEnabled by remember { mutableStateOf(secureStorage.getVerificationEnabled()) }
-            var sendScreenshotsToLlm by remember { mutableStateOf(secureStorage.getSendScreenshotsToLlm()) }
+            var screenshotMode by remember { mutableStateOf(secureStorage.getScreenshotMode()) }
 
             IOSSettingsRow(
                 icon = Icons.Default.Verified,
@@ -1779,22 +2008,63 @@ fun SettingsTab(
             IOSSettingsRow(
                 icon = Icons.Default.PhotoCamera,
                 iconBackground = IOSOrange,
-                title = "Send Screenshots to LLMs",
-                subtitle = if (sendScreenshotsToLlm) "Visual + structured context" else "Structured data only",
-                trailing = {
-                    Switch(
-                        checked = sendScreenshotsToLlm,
-                        onCheckedChange = {
-                            sendScreenshotsToLlm = it
-                            secureStorage.setSendScreenshotsToLlm(it)
-                        },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = Color.White,
-                            checkedTrackColor = IOSGreen
-                        )
-                    )
-                }
+                title = "Screenshots",
+                subtitle = when (screenshotMode) {
+                    com.agentrelay.models.ScreenshotMode.ON -> "Always send visual context"
+                    com.agentrelay.models.ScreenshotMode.AUTO -> "Adaptive — skips when element map is rich"
+                    com.agentrelay.models.ScreenshotMode.OFF -> "Structured data only"
+                },
+                trailing = {}
             )
+            // Segmented control for screenshot mode
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 58.dp, end = 16.dp, bottom = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(0.dp)
+            ) {
+                val options = listOf(
+                    com.agentrelay.models.ScreenshotMode.ON to "On",
+                    com.agentrelay.models.ScreenshotMode.AUTO to "Auto",
+                    com.agentrelay.models.ScreenshotMode.OFF to "Off"
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            color = Color(0xFFE5E5EA),
+                            shape = RoundedCornerShape(8.dp)
+                        )
+                        .padding(2.dp)
+                ) {
+                    Row {
+                        options.forEach { (mode, label) ->
+                            val isSelected = screenshotMode == mode
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .background(
+                                        color = if (isSelected) Color.White else Color.Transparent,
+                                        shape = RoundedCornerShape(6.dp)
+                                    )
+                                    .clickable {
+                                        screenshotMode = mode
+                                        secureStorage.setScreenshotMode(mode)
+                                    }
+                                    .padding(vertical = 6.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = label,
+                                    fontSize = 13.sp,
+                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                    color = if (isSelected) Color.Black else Color.Gray
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Spacer(modifier = Modifier.height(24.dp))
@@ -2004,6 +2274,252 @@ fun ApiKeyField(
 }
 
 // ─── iOS-style Reusable Components ────────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun InterventionRow(
+    intervention: com.agentrelay.intervention.UserIntervention,
+    dateFormat: java.text.SimpleDateFormat,
+    onDelete: () -> Unit
+) {
+    val dismissState = rememberDismissState(
+        confirmValueChange = { value ->
+            if (value == DismissValue.DismissedToStart) {
+                onDelete()
+                true
+            } else false
+        }
+    )
+
+    SwipeToDismiss(
+        state = dismissState,
+        background = {
+            val direction = dismissState.dismissDirection ?: return@SwipeToDismiss
+            if (direction == DismissDirection.EndToStart) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(IOSRed)
+                        .padding(horizontal = 20.dp),
+                    contentAlignment = Alignment.CenterEnd
+                ) {
+                    Icon(
+                        Icons.Default.Delete,
+                        contentDescription = "Delete",
+                        tint = Color.White
+                    )
+                }
+            }
+        },
+        directions = setOf(DismissDirection.EndToStart),
+        dismissContent = {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(IOSCardBackground)
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Match type indicator dot
+                val isIntervention = intervention.matchType == "INTERVENTION"
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(if (isIntervention) IOSRed else IOSGreen)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            intervention.plannedAction.lowercase().replaceFirstChar { it.uppercase() },
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = IOSLabel
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            intervention.matchType,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = if (isIntervention) IOSRed else IOSGreen,
+                            modifier = Modifier
+                                .background(
+                                    if (isIntervention) IOSRed.copy(alpha = 0.1f) else IOSGreen.copy(alpha = 0.1f),
+                                    RoundedCornerShape(4.dp)
+                                )
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            "${(intervention.matchConfidence * 100).toInt()}%",
+                            fontSize = 11.sp,
+                            color = IOSSecondaryLabel
+                        )
+                    }
+                    if (intervention.plannedDescription.isNotEmpty()) {
+                        Text(
+                            intervention.plannedDescription,
+                            fontSize = 13.sp,
+                            color = IOSSecondaryLabel,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Row {
+                        Text(
+                            dateFormat.format(java.util.Date(intervention.timestamp)),
+                            fontSize = 11.sp,
+                            color = IOSTertiaryLabel
+                        )
+                        if (intervention.currentApp.isNotEmpty()) {
+                            Text(
+                                " · ${intervention.currentApp}",
+                                fontSize = 11.sp,
+                                color = IOSTertiaryLabel
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TraceEventRow(
+    event: com.agentrelay.intervention.AgentTraceEvent,
+    dateFormat: java.text.SimpleDateFormat,
+    onDelete: () -> Unit
+) {
+    val dismissState = rememberDismissState(
+        confirmValueChange = { value ->
+            if (value == DismissValue.DismissedToStart) {
+                onDelete()
+                true
+            } else false
+        }
+    )
+
+    SwipeToDismiss(
+        state = dismissState,
+        background = {
+            val direction = dismissState.dismissDirection ?: return@SwipeToDismiss
+            if (direction == DismissDirection.EndToStart) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(IOSRed)
+                        .padding(horizontal = 20.dp),
+                    contentAlignment = Alignment.CenterEnd
+                ) {
+                    Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.White)
+                }
+            }
+        },
+        directions = setOf(DismissDirection.EndToStart),
+        dismissContent = {
+            val (dotColor, icon) = when (event.eventType) {
+                "TASK_START" -> IOSGreen to Icons.Default.PlayArrow
+                "TASK_END" -> IOSGray to Icons.Default.Stop
+                "PLANNING" -> Color(0xFF5856D6) to Icons.Default.Psychology
+                "LLM_PLAN" -> IOSBlue to Icons.Default.AutoAwesome
+                "STEP_EXECUTED" -> IOSGreen to Icons.Default.CheckCircle
+                "STEP_FAILED" -> IOSRed to Icons.Default.Error
+                "ERROR" -> IOSRed to Icons.Default.Warning
+                else -> IOSGray to Icons.Default.Info
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(IOSCardBackground)
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    icon,
+                    contentDescription = null,
+                    tint = dotColor,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            event.eventType.replace("_", " ").lowercase()
+                                .replaceFirstChar { it.uppercase() },
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = IOSLabel
+                        )
+                        if (event.action != null) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                event.action,
+                                fontSize = 11.sp,
+                                color = dotColor,
+                                modifier = Modifier
+                                    .background(dotColor.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 5.dp, vertical = 1.dp)
+                            )
+                        }
+                        if (event.confidence != null) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                event.confidence,
+                                fontSize = 10.sp,
+                                color = IOSSecondaryLabel
+                            )
+                        }
+                    }
+                    if (event.description.isNotEmpty()) {
+                        Text(
+                            event.description,
+                            fontSize = 13.sp,
+                            color = IOSSecondaryLabel,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    if (event.failureReason != null) {
+                        Text(
+                            event.failureReason,
+                            fontSize = 12.sp,
+                            color = IOSRed,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Row {
+                        Text(
+                            dateFormat.format(java.util.Date(event.timestamp)),
+                            fontSize = 11.sp,
+                            color = IOSTertiaryLabel
+                        )
+                        if (event.iteration > 0) {
+                            Text(
+                                " · iter ${event.iteration}",
+                                fontSize = 11.sp,
+                                color = IOSTertiaryLabel
+                            )
+                        }
+                        if (event.currentApp != null) {
+                            Text(
+                                " · ${event.currentApp}",
+                                fontSize = 11.sp,
+                                color = IOSTertiaryLabel
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    )
+}
 
 @Composable
 fun IOSSectionHeader(title: String) {

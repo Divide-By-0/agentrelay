@@ -83,6 +83,7 @@ class ClaudeAPIClientParsingTest {
                     {"action": "swipe", "direction": "up", "description": "swipe"},
                     {"action": "back", "description": "back"},
                     {"action": "home", "description": "home"},
+                    {"action": "press_enter", "description": "submit"},
                     {"action": "wait", "description": "wait"},
                     {"action": "complete", "description": "done"}
                 ],
@@ -92,15 +93,16 @@ class ClaudeAPIClientParsingTest {
 
         val plan = client.parseSemanticActionPlan(json)
 
-        assertEquals(7, plan.steps.size)
+        assertEquals(8, plan.steps.size)
         assertEquals(SemanticAction.CLICK, plan.steps[0].action)
         assertEquals(SemanticAction.TYPE, plan.steps[1].action)
         assertEquals(SemanticAction.SWIPE, plan.steps[2].action)
         assertEquals("up", plan.steps[2].direction)
         assertEquals(SemanticAction.BACK, plan.steps[3].action)
         assertEquals(SemanticAction.HOME, plan.steps[4].action)
-        assertEquals(SemanticAction.WAIT, plan.steps[5].action)
-        assertEquals(SemanticAction.COMPLETE, plan.steps[6].action)
+        assertEquals(SemanticAction.PRESS_ENTER, plan.steps[5].action)
+        assertEquals(SemanticAction.WAIT, plan.steps[6].action)
+        assertEquals(SemanticAction.COMPLETE, plan.steps[7].action)
     }
 
     @Test
@@ -110,29 +112,29 @@ class ClaudeAPIClientParsingTest {
         val plan = client.parseSemanticActionPlan(json)
 
         assertEquals(1, plan.steps.size)
-        assertEquals(SemanticAction.COMPLETE, plan.steps[0].action)
+        assertEquals(SemanticAction.WAIT, plan.steps[0].action)
         assertNull(plan.steps[0].element)
         assertNull(plan.steps[0].text)
         assertEquals("", plan.steps[0].description)
     }
 
     @Test
-    fun `parseSemanticActionPlan malformed JSON returns COMPLETE with error`() {
+    fun `parseSemanticActionPlan malformed JSON returns WAIT with retry description`() {
         val plan = client.parseSemanticActionPlan("not valid json at all")
 
         assertEquals(1, plan.steps.size)
-        assertEquals(SemanticAction.COMPLETE, plan.steps[0].action)
-        assertTrue(plan.steps[0].description.startsWith("Failed to parse"))
-        assertEquals("Parse error", plan.reasoning)
+        assertEquals(SemanticAction.WAIT, plan.steps[0].action)
+        assertTrue(plan.steps[0].description.contains("unparseable", ignoreCase = true))
+        assertTrue(plan.reasoning.contains("Parse error"))
     }
 
     @Test
-    fun `parseSemanticActionPlan unknown action maps to COMPLETE`() {
+    fun `parseSemanticActionPlan unknown action maps to WAIT`() {
         val json = """{"steps": [{"action": "fly", "description": "fly away"}], "reasoning": ""}"""
 
         val plan = client.parseSemanticActionPlan(json)
 
-        assertEquals(SemanticAction.COMPLETE, plan.steps[0].action)
+        assertEquals(SemanticAction.WAIT, plan.steps[0].action)
     }
 
     @Test

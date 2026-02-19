@@ -31,7 +31,7 @@ class WindowAgentLoop(
             secureStorage.saveLastUploadTime(bytes, ms)
         }
         val treeExtractor = AccessibilityTreeExtractor(automationService)
-        val sendScreenshots = secureStorage.getSendScreenshotsToLlm()
+        val screenshotMode = secureStorage.getScreenshotMode()
         val cursorOverlay = CursorOverlay.getInstance(context)
 
         for (iteration in 1..maxIterations) {
@@ -66,11 +66,23 @@ class WindowAgentLoop(
             // 3. Generate element map using window bounds for dimensions
             val bounds = currentWindowInfo.bounds
             val mapGenerator = ElementMapGenerator(bounds.width(), bounds.height())
-            val elementMap = mapGenerator.generate(elements)
+            val elementMap = mapGenerator.generate(elements, hasWebView = treeExtractor.hasWebView)
             val elementMapText = elementMap.toTextRepresentation()
 
-            // 4. Crop screenshot to this window's bounds
-            val screenshotInfo = if (sendScreenshots && captureService != null) {
+            // 4. Decide screenshot and crop to this window's bounds
+            val shouldSendScreenshot = when (screenshotMode) {
+                ScreenshotMode.ON -> true
+                ScreenshotMode.OFF -> false
+                ScreenshotMode.AUTO -> {
+                    val ocrOnlyCount = 0 // OCR not used in split-screen loop
+                    ElementMapAnalyzer.shouldSendScreenshot(
+                        elementMap = elementMap,
+                        ocrOnlyCount = ocrOnlyCount,
+                        previousIterationFailed = false
+                    ).shouldSend
+                }
+            }
+            val screenshotInfo = if (shouldSendScreenshot && captureService != null) {
                 try {
                     // Hide overlays briefly for clean capture
                     withContext(Dispatchers.Main) {
@@ -110,7 +122,7 @@ class WindowAgentLoop(
 
             val planResult = withContext(Dispatchers.IO) {
                 claudeClient.sendWithElementMap(
-                    if (sendScreenshots) screenshotInfo else null,
+                    if (shouldSendScreenshot) screenshotInfo else null,
                     elementMap,
                     enhancedTask,
                     conversationHistory,
@@ -150,6 +162,22 @@ class WindowAgentLoop(
                         if (key != null && value != null) {
                             coordinator.postFinding(slot, key, value)
                             Log.d(TAG, "[$slot] Shared finding: $key = $value")
+                        }
+                        continue
+                    }
+
+                    SemanticAction.EXTRACT -> {
+                        val query = step.extractQuery
+                        if (!query.isNullOrBlank()) {
+                            val extractor = SemanticExtractor(claudeClient)
+                            val extractResult = extractor.extract(query, elementMap, screenshotInfo)
+                            conversationHistory.add(Message(
+                                role = "user",
+                                content = listOf(ContentBlock.TextContent(
+                                    text = "EXTRACTION RESULT for '$query': ${extractResult.answer}"
+                                ))
+                            ))
+                            Log.d(TAG, "[$slot] Extract: ${extractResult.answer.take(60)}")
                         }
                         continue
                     }
@@ -210,8 +238,9 @@ class WindowAgentLoop(
                 SemanticAction.CLICK, SemanticAction.LONG_PRESS -> {
                     val element = step.element?.let { elementMap.findById(it) }
                         ?: return StepResult(false, failureReason = "Element '${step.element}' not found")
-                    val x = element.bounds.centerX()
-                    val y = element.bounds.centerY()
+                    val clickPt = elementMap.safeClickPoint(element)
+                    val x = clickPt.x
+                    val y = clickPt.y
                     withContext(Dispatchers.Main) { cursorOverlay.moveTo(x, y, showClick = true) }
                     delay(200)
                     val ok = if (step.action == SemanticAction.LONG_PRESS) {
@@ -227,8 +256,9 @@ class WindowAgentLoop(
                     if (step.element != null) {
                         val element = elementMap.findById(step.element)
                         if (element != null) {
-                            val x = element.bounds.centerX()
-                            val y = element.bounds.centerY()
+                            val clickPt = elementMap.safeClickPoint(element)
+                            val x = clickPt.x
+                            val y = clickPt.y
                             withContext(Dispatchers.Main) { cursorOverlay.moveTo(x, y, showClick = true) }
                             delay(200)
                             automationService.performTap(x, y)
@@ -264,6 +294,10 @@ class WindowAgentLoop(
                 SemanticAction.HOME -> StepResult(automationService.performHome())
                 SemanticAction.WAIT -> { delay(1000); StepResult(true) }
                 SemanticAction.DISMISS_KEYBOARD -> StepResult(automationService.dismissKeyboard())
+                SemanticAction.PRESS_ENTER -> {
+                    val ok = automationService.pressKeyboardEnter()
+                    StepResult(ok, failureReason = if (!ok) "Failed to press keyboard enter key" else null)
+                }
 
                 SemanticAction.OPEN_APP -> {
                     val pkg = step.packageName ?: return StepResult(false, failureReason = "Missing package")

@@ -36,6 +36,26 @@ data class UserIntervention(
     val elementMapSnapshot: String? = null
 )
 
+@Entity(tableName = "agent_trace_events")
+data class AgentTraceEvent(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val timestamp: Long = System.currentTimeMillis(),
+    val taskDescription: String = "",
+    val eventType: String = "",   // PLANNING, STEP_EXECUTED, STEP_FAILED, ERROR, TASK_START, TASK_END
+    val action: String? = null,   // SemanticAction name
+    val elementId: String? = null,
+    val description: String = "",
+    val reasoning: String? = null, // LLM reasoning text
+    val confidence: String? = null, // high/medium/low
+    val currentApp: String? = null,
+    val currentAppPackage: String? = null,
+    val iteration: Int = 0,
+    val stepIndex: Int = 0,
+    val success: Boolean = true,
+    val failureReason: String? = null,
+    val planSteps: String? = null  // compact summary of planned steps
+)
+
 @Dao
 interface InterventionDao {
     @Insert
@@ -50,13 +70,42 @@ interface InterventionDao {
     @Query("SELECT COUNT(*) FROM user_interventions")
     suspend fun getCount(): Int
 
+    @Query("DELETE FROM user_interventions WHERE id = :id")
+    suspend fun deleteById(id: Long)
+
     @Query("SELECT * FROM user_interventions ORDER BY timestamp ASC")
     suspend fun exportAll(): List<UserIntervention>
 }
 
-@Database(entities = [UserIntervention::class], version = 1, exportSchema = false)
+@Dao
+interface AgentTraceDao {
+    @Insert
+    suspend fun insert(event: AgentTraceEvent): Long
+
+    @Query("SELECT * FROM agent_trace_events ORDER BY timestamp DESC LIMIT :limit")
+    suspend fun getRecent(limit: Int = 200): List<AgentTraceEvent>
+
+    @Query("SELECT COUNT(*) FROM agent_trace_events")
+    suspend fun getCount(): Int
+
+    @Query("DELETE FROM agent_trace_events WHERE id = :id")
+    suspend fun deleteById(id: Long)
+
+    @Query("SELECT * FROM agent_trace_events ORDER BY timestamp ASC")
+    suspend fun exportAll(): List<AgentTraceEvent>
+
+    @Query("DELETE FROM agent_trace_events")
+    suspend fun deleteAll()
+}
+
+@Database(
+    entities = [UserIntervention::class, AgentTraceEvent::class],
+    version = 2,
+    exportSchema = false
+)
 abstract class InterventionDatabase : RoomDatabase() {
     abstract fun interventionDao(): InterventionDao
+    abstract fun agentTraceDao(): AgentTraceDao
 
     companion object {
         @Volatile
@@ -68,7 +117,10 @@ abstract class InterventionDatabase : RoomDatabase() {
                     context.applicationContext,
                     InterventionDatabase::class.java,
                     "intervention_database"
-                ).build().also { INSTANCE = it }
+                )
+                    .fallbackToDestructiveMigration()
+                    .build()
+                    .also { INSTANCE = it }
             }
         }
     }

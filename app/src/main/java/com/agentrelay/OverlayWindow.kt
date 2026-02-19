@@ -14,6 +14,8 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.*
 import androidx.cardview.widget.CardView
+import android.os.Handler
+import android.os.Looper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -339,6 +341,22 @@ class OverlayWindow(private val context: Context) {
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to hide overlay window", e)
             }
+        }
+    }
+
+    /**
+     * Called from VoiceCommandService when a voice task is captured.
+     * Briefly shows the overlay with the task text, then auto-starts after a delay.
+     */
+    fun startTaskFromVoice(task: String) {
+        Handler(Looper.getMainLooper()).post {
+            // Show a brief toast-like notification of what was heard
+            Toast.makeText(context, "\uD83C\uDF99 \"$task\"", Toast.LENGTH_SHORT).show()
+
+            // Auto-start the task after a short delay so the user sees the feedback
+            Handler(Looper.getMainLooper()).postDelayed({
+                startTaskWithCaptureCheck(task)
+            }, 1500)
         }
     }
 

@@ -50,6 +50,8 @@ class AgentOrchestrator(private val context: Context) {
     private val conversationHistory = mutableListOf<Message>()
     private var currentTask: String = ""
     private var screenRecorder: ScreenRecorder? = null
+    /** After the first LLM call, only send these app packages in device context */
+    private var relevantAppPackages: Set<String>? = null
 
     /** Optional callback fired when a task finishes (used by benchmark harness). Auto-clears after firing. */
     var onTaskFinished: ((status: String, iterations: Int, message: String) -> Unit)? = null
@@ -73,42 +75,68 @@ class AgentOrchestrator(private val context: Context) {
             return
         }
 
-        if (!AutomationService.isServiceEnabled()) {
+        val accessibilityInstanceEnabled = AutomationService.isServiceEnabled()
+        val accessibilitySettingsEnabled = AutomationService.isServiceEnabledInSettings(context)
+        if (accessibilityInstanceEnabled != accessibilitySettingsEnabled) {
+            Log.w(
+                TAG,
+                "Accessibility state mismatch (instance=$accessibilityInstanceEnabled, settings=$accessibilitySettingsEnabled). " +
+                    "NOTE: automation has been working so far; keep monitoring consistency."
+            )
+        }
+        if (!accessibilityInstanceEnabled) {
             showToast("Please enable Accessibility Service")
             return
         }
 
+        val screenshotMode = secStore.getScreenshotMode()
+        val screenRecordingEnabled = secStore.getScreenRecordingEnabled()
+        // Always capture screenshots — even when mode is OFF, we need them for
+        // OCR/segmentation to enrich the element map (WebView content is invisible
+        // to the accessibility tree without visual analysis).
+        val useScreenshotsInLoop = true
+
         val captureService = ScreenCaptureService.instance
-        if (captureService == null || !captureService.hasActiveProjection()) {
+        val hasProjection = captureService?.hasActiveProjection() == true
+        if (useScreenshotsInLoop && !hasProjection) {
             Log.e(TAG, "Screen capture not active — refusing to start agent")
             showToast("Enable screen capture before starting the agent")
             ConversationHistoryManager.add(
                 ConversationItem(
                     timestamp = System.currentTimeMillis(),
                     type = ConversationItem.ItemType.ERROR,
-                    status = "Agent start blocked: screen capture not active (service=${captureService != null}, projection=${captureService?.hasActiveProjection()})"
+                    status = "Agent start blocked: screen capture not active (service=${captureService != null}, projection=${captureService?.hasActiveProjection()}, useScreenshotsInLoop=$useScreenshotsInLoop)"
                 )
             )
             return
         }
-        // Log virtual display diagnostics
-        Log.d(TAG, "Screen capture active: ${captureService.getVirtualDisplayInfo()}")
-        ConversationHistoryManager.add(
-            ConversationItem(
-                timestamp = System.currentTimeMillis(),
-                type = ConversationItem.ItemType.API_REQUEST,
-                status = "Screen capture: ${captureService.getVirtualDisplayInfo()}"
+        if (hasProjection) {
+            Log.d(TAG, "Screen capture active: ${captureService?.getVirtualDisplayInfo()}")
+            ConversationHistoryManager.add(
+                ConversationItem(
+                    timestamp = System.currentTimeMillis(),
+                    type = ConversationItem.ItemType.API_REQUEST,
+                    status = "Screen capture: ${captureService?.getVirtualDisplayInfo()}"
+                )
             )
-        )
+        } else {
+            Log.i(
+                TAG,
+                "Starting accessibility-only loop (screenshots disabled by settings). " +
+                    "screenshotMode=$screenshotMode, ocr=${secStore.getOcrEnabled()}, recording=$screenRecordingEnabled"
+            )
+        }
 
         currentTask = task
         conversationHistory.clear()
         recentActions.clear()
+        relevantAppPackages = null
         isRunning = true
 
-        // Initialize intervention tracker
+        // Initialize intervention tracker and log task start
         val tracker = InterventionTracker.getInstance(context)
         tracker.setTaskContext(task)
+        tracker.logTrace("TASK_START", "Agent started: $task")
 
         // Show touch block overlay if enabled
         if (secStore.getBlockTouchDuringAgent()) {
@@ -158,7 +186,7 @@ class AgentOrchestrator(private val context: Context) {
 
         currentJob = orchestratorScope.launch {
             try {
-                runAgentLoop(apiKey, task, captureService)
+                runAgentLoop(apiKey, task, if (useScreenshotsInLoop) captureService else null)
             } catch (e: Exception) {
                 Log.e(TAG, "Agent loop failed", e)
                 addStatus("Error: ${e.message}")
@@ -189,7 +217,9 @@ class AgentOrchestrator(private val context: Context) {
 
         // Hide touch block overlay and clear intervention tracker
         TouchBlockOverlay.getInstance(context).hide()
-        InterventionTracker.getInstance(context).clearPlannedAction()
+        val tracker = InterventionTracker.getInstance(context)
+        tracker.logTrace("TASK_END", "Agent stopped")
+        tracker.clearPlannedAction()
 
         CursorOverlay.getInstance(context).hide()
         StatusOverlay.getInstance(context).hide()
@@ -273,7 +303,7 @@ class AgentOrchestrator(private val context: Context) {
         val treeExtractor = AccessibilityTreeExtractor(automationService)
         val ocrEnabled = secureStorage.getOcrEnabled()
         val verificationEnabled = secureStorage.getVerificationEnabled()
-        val sendScreenshotsToLlm = secureStorage.getSendScreenshotsToLlm()
+        val screenshotMode = secureStorage.getScreenshotMode()
 
         var iteration = 0
         val maxIterations = 50
@@ -365,6 +395,11 @@ class AgentOrchestrator(private val context: Context) {
                         currentPlan = planResult
                         val approachName = planResult.approaches.getOrNull(planResult.recommendedIndex)?.name ?: "Default"
                         addStatus("Strategy ready: $approachName")
+                        InterventionTracker.getInstance(context).logTrace(
+                            "PLANNING", "Strategy: $approachName",
+                            reasoning = planResult.toGuidanceText(),
+                            iteration = iteration
+                        )
                         ConversationHistoryManager.add(
                             ConversationItem(
                                 timestamp = System.currentTimeMillis(),
@@ -461,7 +496,7 @@ class AgentOrchestrator(private val context: Context) {
                 lastResortConsulted = true
                 addStatus("Last-resort planning consultation...")
                 try {
-                    val lastResortScreenshot = if (sendScreenshotsToLlm) captureCleanScreenshot(captureService) else null
+                    val lastResortScreenshot = captureCleanScreenshot(captureService)
 
                     val lastResortPlan = planningAgent.planRecovery(
                         task, lastResortScreenshot, lastElementMapText,
@@ -510,7 +545,7 @@ class AgentOrchestrator(private val context: Context) {
             val currentMapText = elementMap.toTextRepresentation()
             val previousMapForDiff = if (iteration > 1) lastElementMapText else null
             if (iteration == 1 && planningAgent != null && pendingPlanJob == null) {
-                val planScreenshot = if (sendScreenshotsToLlm) screenshotInfo else null
+                val planScreenshot = screenshotInfo
                 val planMapText = currentMapText
                 // Re-fetch from cache in case it populated since loop start
                 val planApps = DeviceContextCache.installedApps.ifEmpty { installedApps }
@@ -623,9 +658,7 @@ class AgentOrchestrator(private val context: Context) {
                             val recovApps = installedApps
                             pendingRecoveryPlanJob = orchestratorScope.async(Dispatchers.IO) {
                                 try {
-                                    val recovScreenshot = if (sendScreenshotsToLlm) {
-                                        withContext(Dispatchers.Main) { captureCleanScreenshot(captureService) }
-                                    } else null
+                                    val recovScreenshot = withContext(Dispatchers.Main) { captureCleanScreenshot(captureService) }
                                     planningAgent.planRecovery(
                                         task, recovScreenshot, recovMapText,
                                         recovFailureCtx, recovCurrentPlan, recovApps
@@ -652,9 +685,9 @@ class AgentOrchestrator(private val context: Context) {
                 null
             }
 
-            // 5. Send screenshot + element map + device context to Claude
+            // 5. Send screenshot + element map + device context to selected provider
             val apiStartTime = System.currentTimeMillis()
-            addStatus("Sending to Claude...")
+            addStatus("Sending...")
 
             // Build action history context for stuck detection
             val actionHistoryContext = buildActionHistoryContext()
@@ -676,20 +709,53 @@ class AgentOrchestrator(private val context: Context) {
                 }
             }
 
+            // Filter installed apps to only relevant ones after first call
+            val filteredDeviceContext = if (relevantAppPackages != null && deviceContext != null) {
+                val currentPkg = deviceContext.currentAppPackage
+                val filtered = deviceContext.installedApps.filter { app ->
+                    app.packageName in relevantAppPackages!! || app.packageName == currentPkg
+                }
+                Log.d(TAG, "Filtered apps: ${deviceContext.installedApps.size} → ${filtered.size}")
+                deviceContext.copy(installedApps = filtered)
+            } else {
+                deviceContext
+            }
+            val isFirstCall = relevantAppPackages == null
+
+            // Decide whether to include screenshot for this iteration
+            val shouldSendScreenshot = when (screenshotMode) {
+                com.agentrelay.models.ScreenshotMode.ON -> true
+                com.agentrelay.models.ScreenshotMode.OFF -> false
+                com.agentrelay.models.ScreenshotMode.AUTO -> {
+                    val ocrOnlyCount = ocrElements.count { it.source == com.agentrelay.models.ElementSource.OCR }
+                    val decision = ElementMapAnalyzer.shouldSendScreenshot(
+                        elementMap = elementMap,
+                        ocrOnlyCount = ocrOnlyCount,
+                        previousIterationFailed = failureContext.isNotEmpty(),
+                        sameMapCount = sameMapCount,
+                        structureRepeatCount = hashOccurrences,
+                        keyboardVisible = deviceContext?.keyboardVisible == true
+                    )
+                    addStatus("Auto: ${decision.reason}")
+                    decision.shouldSend
+                }
+            }
+
             // Run API call on IO dispatcher so Main thread stays free for UI updates
             val planResult = withContext(Dispatchers.IO) {
                 claudeClient.sendWithElementMap(
-                    if (sendScreenshotsToLlm) screenshotInfo else null,
+                    if (shouldSendScreenshot) screenshotInfo else null,
                     elementMap,
                     enhancedTask,
                     conversationHistory,
-                    deviceContext,
-                    previousElementMapText = previousMapForDiff
+                    filteredDeviceContext,
+                    previousElementMapText = previousMapForDiff,
+                    isFirstCall = isFirstCall
                 )
             }
 
             if (planResult.isFailure) {
-                Log.e(TAG, "Claude API failed: ${planResult.exceptionOrNull()?.message}")
+                Log.e(TAG, "API failed: ${planResult.exceptionOrNull()?.message}")
                 addStatus("API error: ${planResult.exceptionOrNull()?.message}")
                 ConversationHistoryManager.add(
                     ConversationItem(
@@ -704,9 +770,27 @@ class AgentOrchestrator(private val context: Context) {
 
             val apiTime = System.currentTimeMillis() - apiStartTime
             val plan = planResult.getOrNull() ?: continue
+
+            // Capture relevant apps from first LLM response to filter future calls
+            if (isFirstCall && plan.relevantApps.isNotEmpty()) {
+                relevantAppPackages = plan.relevantApps.toSet()
+                Log.d(TAG, "LLM selected ${relevantAppPackages!!.size} relevant apps: ${relevantAppPackages}")
+            } else if (isFirstCall) {
+                // LLM didn't return relevant_apps — don't filter
+                relevantAppPackages = deviceContext?.installedApps?.map { it.packageName }?.toSet() ?: emptySet()
+                Log.d(TAG, "LLM didn't specify relevant apps — keeping all")
+            }
+
             val timingMsg = "⏱ screenshot=${screenshotTime}ms extract=${extractTime}ms api=${apiTime}ms"
             Log.d(TAG, timingMsg)
-            addStatus("Claude plan: ${plan.reasoning} ($timingMsg)")
+            addStatus("Plan: ${plan.reasoning} ($timingMsg)")
+            InterventionTracker.getInstance(context).logTrace(
+                "LLM_PLAN", plan.reasoning,
+                reasoning = plan.steps.joinToString("; ") { "${it.action} ${it.element ?: ""}: ${it.description}" },
+                confidence = plan.confidence,
+                iteration = iteration,
+                planSteps = plan.steps.mapIndexed { i, s -> "${i+1}. ${s.action} ${s.element ?: ""}" }.joinToString(", ")
+            )
             ConversationHistoryManager.add(
                 ConversationItem(
                     timestamp = System.currentTimeMillis(),
@@ -762,7 +846,7 @@ class AgentOrchestrator(private val context: Context) {
             val stepSignal = executeStepPlan(
                 plan, task, elementMap, currentMapText, screenshotInfo, screenW, screenH,
                 ocrElements, automationService, cursorOverlay, claudeClient, treeExtractor,
-                captureService, sendScreenshotsToLlm, verificationEnabled,
+                captureService, screenshotMode != com.agentrelay.models.ScreenshotMode.OFF, verificationEnabled,
                 failureContext, planningAgent, currentPlan, installedApps,
                 iteration, lastPlanConsultIteration, failuresSinceLastPlan
             )
@@ -779,7 +863,7 @@ class AgentOrchestrator(private val context: Context) {
             }
 
             // Wait for UI to settle before next iteration via screenshot diffing
-            addStatus("Waiting for UI to settle...")
+            addStatus("Awaiting ui settle...")
             waitForUiSettle(captureService, minWaitMs = 100, maxWaitMs = 1000, pollIntervalMs = 150)
         }
 
@@ -832,14 +916,20 @@ class AgentOrchestrator(private val context: Context) {
         StatusOverlay.getInstance(context).setInvisible(false)
         CursorOverlay.getInstance(context).setInvisible(false)
 
+        // Always run OCR when we have a screenshot — even if user toggled OCR off,
+        // OCR is critical for reading WebView/rendered content that the accessibility
+        // tree can't see (emails, web pages, etc.)
         var ocrElements = emptyList<UIElement>()
-        if (ocrEnabled && screenshotInfo != null) {
+        if (screenshotInfo != null) {
             try {
                 val ocrClient = OCRClient(secureStorage)
                 val ocrResult = withContext(Dispatchers.IO) {
                     ocrClient.recognizeText(screenshotInfo)
                 }
                 ocrElements = ocrResult
+                if (!ocrEnabled) {
+                    Log.d(TAG, "OCR ran implicitly (setting off but needed for element map enrichment): ${ocrElements.size} elements")
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "OCR failed, continuing with accessibility tree only", e)
             }
@@ -868,7 +958,7 @@ class AgentOrchestrator(private val context: Context) {
             }
         }
         val mapGenerator = ElementMapGenerator(screenW, screenH)
-        val elementMap = mapGenerator.generate(a11yElements, ocrElements)
+        val elementMap = mapGenerator.generate(a11yElements, ocrElements, treeExtractor.hasWebView)
         val extractTime = System.currentTimeMillis() - extractStartTime
         addStatus("Element map: ${elementMap.elements.size} elements")
         Log.d(TAG, elementMap.toTextRepresentation())
@@ -973,6 +1063,33 @@ class AgentOrchestrator(private val context: Context) {
 
             // Handle complete action
             if (step.action == SemanticAction.COMPLETE) {
+                // If COMPLETE is bundled with other actions, skip it — force re-evaluation
+                // next iteration so the model can verify the result of its actions first.
+                if (stepIdx > 0) {
+                    Log.w(TAG, "Stripping premature COMPLETE bundled with actions — will re-evaluate next iteration")
+                    addStatus("Verifying action results before completing...")
+                    // Await any pending verification from the previous step
+                    if (prevStepVerificationJob != null) {
+                        try {
+                            val verResult = prevStepVerificationJob!!.await()
+                            if (!verResult.success) {
+                                Log.w(TAG, "Pre-complete verification failed: ${verResult.reason}")
+                                failureContext.add("Action before COMPLETE didn't take effect: ${verResult.reason}")
+                                conversationHistory.add(Message(role = "user", content = listOf(
+                                    ContentBlock.TextContent(
+                                        text = "You tried to complete the task, but the previous action " +
+                                            "'${prevStep?.description}' did NOT work as expected: ${verResult.reason}. " +
+                                            "Check the current screen and try again."
+                                    )
+                                )))
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Pre-complete verification threw exception", e)
+                        }
+                        prevStepVerificationJob = null
+                    }
+                    break  // Break to re-evaluate with fresh screen state
+                }
                 val completeResult = handleCompleteAction(step, task, claudeClient, treeExtractor,
                     captureService, sendScreenshotsToLlm, failureContext)
                 signal = completeResult.signal
@@ -1054,6 +1171,34 @@ class AgentOrchestrator(private val context: Context) {
                 interventionTracker.setCurrentApp(deviceCtx.currentAppName, deviceCtx.currentAppPackage)
             } catch (_: Exception) {}
 
+            // Handle EXTRACT action inline (needs claudeClient + conversationHistory)
+            if (step.action == SemanticAction.EXTRACT) {
+                val query = step.extractQuery
+                if (query.isNullOrBlank()) {
+                    addStatus("Extract: missing query")
+                } else {
+                    val extractor = SemanticExtractor(claudeClient)
+                    val extractResult = extractor.extract(query, liveElementMap, screenshotInfo)
+                    conversationHistory.add(Message(
+                        role = "user",
+                        content = listOf(ContentBlock.TextContent(
+                            text = "EXTRACTION RESULT for '$query': ${extractResult.answer} [source: ${extractResult.source}]"
+                        ))
+                    ))
+                    addStatus("Extract (${extractResult.source}): ${extractResult.answer.take(60)}")
+                    ConversationHistoryManager.add(
+                        ConversationItem(
+                            timestamp = System.currentTimeMillis(),
+                            type = ConversationItem.ItemType.ACTION_EXECUTED,
+                            action = "EXTRACT",
+                            actionDescription = "Extract: $query → ${extractResult.answer.take(80)}",
+                            status = "Extract: ${extractResult.answer.take(60)}"
+                        )
+                    )
+                }
+                continue // Move to next step
+            }
+
             // Execute the step
             val stepStartTime = System.currentTimeMillis()
             val result = executeSemanticStep(step, liveElementMap, automationService, cursorOverlay)
@@ -1066,6 +1211,15 @@ class AgentOrchestrator(private val context: Context) {
             }
 
             if (!result.success) {
+                InterventionTracker.getInstance(context).logTrace(
+                    "STEP_FAILED", step.description,
+                    action = step.action.name,
+                    elementId = step.element,
+                    iteration = iteration,
+                    stepIndex = stepIdx,
+                    success = false,
+                    failureReason = result.failureReason
+                )
                 val retryOutcome = handleStepFailure(
                     step, result, liveElementMap, liveMapText, screenshotInfo, screenW, screenH,
                     ocrElements, automationService, cursorOverlay, treeExtractor, captureService,
@@ -1088,7 +1242,15 @@ class AgentOrchestrator(private val context: Context) {
             recentActions.add(ActionRecord(step.action, step.element, step.text, step.description))
             if (recentActions.size > 20) recentActions.removeAt(0)
 
-            addStatus("Step completed: ${step.description}")
+            addStatus("done: ${step.description}")
+            InterventionTracker.getInstance(context).logTrace(
+                "STEP_EXECUTED", step.description,
+                action = step.action.name,
+                elementId = step.element,
+                iteration = iteration,
+                stepIndex = stepIdx,
+                success = true
+            )
             ConversationHistoryManager.add(
                 ConversationItem(
                     timestamp = System.currentTimeMillis(),
@@ -1123,14 +1285,14 @@ class AgentOrchestrator(private val context: Context) {
             // Wait for UI to settle between steps
             if (stepIdx < plan.steps.lastIndex) {
                 val isNavAction = step.action in listOf(
-                    SemanticAction.OPEN_APP, SemanticAction.BACK, SemanticAction.HOME, SemanticAction.SWIPE
+                    SemanticAction.OPEN_APP, SemanticAction.BACK, SemanticAction.HOME, SemanticAction.SWIPE, SemanticAction.PRESS_ENTER
                 )
                 if (isNavAction) waitForUiSettle(captureService, minWaitMs = 150, maxWaitMs = 1200, pollIntervalMs = 150)
                 else waitForUiSettle(captureService, minWaitMs = 50, maxWaitMs = 500, pollIntervalMs = 100)
 
                 // Refresh element map after UI-changing actions so subsequent steps use fresh data
                 if (step.action in listOf(SemanticAction.CLICK, SemanticAction.TYPE, SemanticAction.SWIPE,
-                        SemanticAction.OPEN_APP, SemanticAction.BACK, SemanticAction.HOME)) {
+                        SemanticAction.OPEN_APP, SemanticAction.BACK, SemanticAction.HOME, SemanticAction.PRESS_ENTER)) {
                     try {
                         // Hide overlays during extraction so they don't obscure elements
                         StatusOverlay.getInstance(context).setInvisible(true)
@@ -1384,9 +1546,7 @@ class AgentOrchestrator(private val context: Context) {
             val recovApps = installedApps
             pendingRecoveryPlanJob = orchestratorScope.async(Dispatchers.IO) {
                 try {
-                    val recoveryScreenshot = if (sendScreenshotsToLlm) {
-                        withContext(Dispatchers.Main) { captureCleanScreenshot(captureService) }
-                    } else null
+                    val recoveryScreenshot = withContext(Dispatchers.Main) { captureCleanScreenshot(captureService) }
                     planningAgent.planRecovery(
                         task, recoveryScreenshot, recovMapText,
                         recovFailureCtx, recovCurrentPlan, recovApps
@@ -1452,6 +1612,10 @@ class AgentOrchestrator(private val context: Context) {
 
                 Be STRICT: if the task has multiple parts, ALL parts must be done.
                 If the screen shows the task is only partially done, return false.
+                Look for CONCRETE EVIDENCE that the action succeeded — e.g. a sent message appearing in a chat thread,
+                a confirmation screen, a success toast/banner, or the expected result visible on screen.
+                Do NOT assume success just because a button was tapped. If the screen looks the same as before
+                the action, or shows an input field still waiting for content, the task is NOT complete.
             """.trimIndent()
 
             val contentBlocks = mutableListOf<ContentBlock>()
@@ -1527,8 +1691,9 @@ class AgentOrchestrator(private val context: Context) {
                         Log.e(TAG, reason)
                         return StepExecutionResult(false, failureReason = reason)
                     }
-                    val x = element.bounds.centerX()
-                    val y = element.bounds.centerY()
+                    val clickPt = elementMap.safeClickPoint(element)
+                    val x = clickPt.x
+                    val y = clickPt.y
                     val isLongPress = step.action == SemanticAction.LONG_PRESS
                     Log.d(TAG, "${if (isLongPress) "Long press" else "Click"} ${step.element} at ($x, $y)")
                     cursorOverlay.moveTo(x, y, showClick = true)
@@ -1556,8 +1721,9 @@ class AgentOrchestrator(private val context: Context) {
                     if (step.element != null) {
                         val element = elementMap.findById(step.element)
                         if (element != null) {
-                            tapX = element.bounds.centerX()
-                            tapY = element.bounds.centerY()
+                            val clickPt = elementMap.safeClickPoint(element)
+                            tapX = clickPt.x
+                            tapY = clickPt.y
                             elText = element.text
                             cursorOverlay.moveTo(tapX, tapY, showClick = true)
                             delay(300)
@@ -1641,11 +1807,17 @@ class AgentOrchestrator(private val context: Context) {
                     StepExecutionResult(ok, failureReason = if (!ok) "Failed to dismiss keyboard" else null)
                 }
 
+                SemanticAction.PRESS_ENTER -> {
+                    val ok = automationService.pressKeyboardEnter()
+                    StepExecutionResult(ok, failureReason = if (!ok) "Failed to press keyboard enter key" else null)
+                }
+
                 SemanticAction.SHARE_FINDING -> {
                     Log.d(TAG, "Share finding: ${step.findingKey} = ${step.findingValue}")
                     StepExecutionResult(true)
                 }
 
+                SemanticAction.EXTRACT -> StepExecutionResult(true) // handled inline before this call
                 SemanticAction.COMPLETE -> StepExecutionResult(true)
             }
         } catch (e: Exception) {

@@ -17,6 +17,7 @@ class FloatingBubble(private val context: Context) {
     private var bubbleView: BubbleView? = null
     private var dismissView: DismissZoneView? = null
     private var isShowing = false
+    private var isVoiceListening = false
     private var params: WindowManager.LayoutParams? = null
     private var dismissParams: WindowManager.LayoutParams? = null
 
@@ -57,6 +58,11 @@ class FloatingBubble(private val context: Context) {
                 Log.e(TAG, "Failed to show floating bubble", e)
             }
         }
+    }
+
+    fun setVoiceListening(active: Boolean) {
+        isVoiceListening = active
+        bubbleView?.setVoiceActive(active)
     }
 
     fun hide() {
@@ -247,10 +253,21 @@ class FloatingBubble(private val context: Context) {
             typeface = Typeface.DEFAULT_BOLD
         }
 
+        private val micDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#34C759") // iOS green
+            style = Paint.Style.FILL
+        }
+
         private var tapScale = 1f
+        private var voiceActive = false
 
         init {
             setLayerType(LAYER_TYPE_SOFTWARE, null) // needed for shadow
+        }
+
+        fun setVoiceActive(active: Boolean) {
+            voiceActive = active
+            invalidate()
         }
 
         override fun onDraw(canvas: Canvas) {
@@ -263,6 +280,14 @@ class FloatingBubble(private val context: Context) {
             // Draw a simple play/robot icon using text
             val textY = cy - (iconPaint.descent() + iconPaint.ascent()) / 2
             canvas.drawText("\u25B6", cx, textY, iconPaint) // ▶ play symbol
+
+            // Mic indicator dot at top-right when voice listening
+            if (voiceActive) {
+                val dotRadius = 10f
+                val dotX = cx + radius * 0.6f
+                val dotY = cy - radius * 0.6f
+                canvas.drawCircle(dotX, dotY, dotRadius, micDotPaint)
+            }
         }
 
         fun showTapFeedback() {

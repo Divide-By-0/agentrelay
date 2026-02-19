@@ -74,6 +74,10 @@ class SecureStorage(context: Context) {
 
     fun getGeminiApiKey(): String? {
         return sharedPreferences.getString(KEY_GEMINI_API_KEY, null)
+            ?: try {
+                val resId = appContext.resources.getIdentifier("default_gemini_api_key", "string", appContext.packageName)
+                if (resId != 0) appContext.getString(resId).ifEmpty { null } else null
+            } catch (_: Exception) { null }
     }
 
     fun getApiKeyForModel(model: String): String? {
@@ -202,6 +206,22 @@ class SecureStorage(context: Context) {
         return sharedPreferences.getBoolean(KEY_SEND_SCREENSHOTS_TO_LLM, true)
     }
 
+    fun setScreenshotMode(mode: com.agentrelay.models.ScreenshotMode) {
+        sharedPreferences.edit().putString(KEY_SCREENSHOT_MODE, mode.name).apply()
+    }
+
+    fun getScreenshotMode(): com.agentrelay.models.ScreenshotMode {
+        val stored = sharedPreferences.getString(KEY_SCREENSHOT_MODE, null)
+        if (stored != null) {
+            return try { com.agentrelay.models.ScreenshotMode.valueOf(stored) }
+            catch (_: Exception) { com.agentrelay.models.ScreenshotMode.AUTO }
+        }
+        // Migrate from old boolean toggle
+        val oldValue = sharedPreferences.getBoolean(KEY_SEND_SCREENSHOTS_TO_LLM, true)
+        return if (oldValue) com.agentrelay.models.ScreenshotMode.AUTO
+        else com.agentrelay.models.ScreenshotMode.OFF
+    }
+
     fun savePlanningModel(model: String) {
         sharedPreferences.edit().putString(KEY_PLANNING_MODEL, model).apply()
     }
@@ -234,6 +254,14 @@ class SecureStorage(context: Context) {
         return sharedPreferences.getBoolean(KEY_INTERVENTION_TRACKING, true)
     }
 
+    fun setWakeWordEnabled(enabled: Boolean) {
+        sharedPreferences.edit().putBoolean(KEY_WAKE_WORD_ENABLED, enabled).apply()
+    }
+
+    fun getWakeWordEnabled(): Boolean {
+        return sharedPreferences.getBoolean(KEY_WAKE_WORD_ENABLED, false)
+    }
+
     companion object {
         private const val KEY_CLAUDE_API_KEY = "claude_api_key_v2"
         private const val KEY_OPENAI_API_KEY = "openai_api_key"
@@ -248,10 +276,12 @@ class SecureStorage(context: Context) {
         private const val KEY_FLOATING_BUBBLE = "floating_bubble_enabled"
         private const val KEY_PLANNING_ENABLED = "planning_enabled"
         private const val KEY_SEND_SCREENSHOTS_TO_LLM = "send_screenshots_to_llm"
+        private const val KEY_SCREENSHOT_MODE = "screenshot_mode"
         private const val KEY_PLANNING_MODEL = "planning_model"
         private const val KEY_SCREEN_RECORDING_ENABLED = "screen_recording_enabled"
         private const val KEY_BLOCK_TOUCH_DURING_AGENT = "block_touch_during_agent"
         private const val KEY_INTERVENTION_TRACKING = "intervention_tracking_enabled"
+        private const val KEY_WAKE_WORD_ENABLED = "wake_word_enabled"
 
         fun providerForModel(model: String): Provider {
             return when {

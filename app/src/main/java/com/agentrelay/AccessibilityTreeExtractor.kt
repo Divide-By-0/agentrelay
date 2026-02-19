@@ -10,7 +10,12 @@ import kotlinx.coroutines.delay
 
 class AccessibilityTreeExtractor(private val service: AutomationService) {
 
+    /** Set to true after extract() if a WebView node was found in the tree. */
+    var hasWebView: Boolean = false
+        private set
+
     suspend fun extract(rootOverride: AccessibilityNodeInfo? = null): List<UIElement> {
+        hasWebView = false
         var root: AccessibilityNodeInfo? = rootOverride
         if (root == null) {
             for (attempt in 1..3) {
@@ -46,7 +51,11 @@ class AccessibilityTreeExtractor(private val service: AutomationService) {
             return
         }
 
-        val type = classNameToElementType(node.className?.toString())
+        val className = node.className?.toString()
+        if (className != null && className.contains("WebView")) {
+            hasWebView = true
+        }
+        val type = classNameToElementType(className)
         val text = extractText(node)
         val isInteractive = node.isClickable || node.isFocusable || node.isCheckable
 
@@ -81,7 +90,7 @@ class AccessibilityTreeExtractor(private val service: AutomationService) {
                 UIElement(
                     id = "", // assigned later by ElementMapGenerator
                     type = type,
-                    text = text.take(100), // Truncate very long text
+                    text = text.take(500), // Truncate very long text (keep generous to avoid losing context)
                     bounds = bounds,
                     isClickable = node.isClickable,
                     isFocusable = node.isFocusable,

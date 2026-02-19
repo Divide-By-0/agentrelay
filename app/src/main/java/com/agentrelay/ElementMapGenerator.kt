@@ -11,7 +11,8 @@ class ElementMapGenerator(
 
     fun generate(
         accessibilityElements: List<UIElement>,
-        ocrElements: List<UIElement> = emptyList()
+        ocrElements: List<UIElement> = emptyList(),
+        hasWebView: Boolean = false
     ): ElementMap {
         val merged = mergeElements(accessibilityElements, ocrElements)
         val withPositions = computeRelativePositions(merged)
@@ -21,7 +22,8 @@ class ElementMapGenerator(
         return ElementMap(
             elements = reindexed,
             screenWidth = screenWidth,
-            screenHeight = screenHeight
+            screenHeight = screenHeight,
+            hasWebView = hasWebView
         )
     }
 

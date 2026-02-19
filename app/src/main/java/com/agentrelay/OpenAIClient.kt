@@ -4,6 +4,7 @@ import android.util.Log
 import com.agentrelay.models.*
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
+import com.google.gson.JsonElement
 import com.google.gson.annotations.SerializedName
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
@@ -20,13 +21,21 @@ import java.util.concurrent.TimeUnit
 private data class OpenAIRequest(
     val model: String,
     val messages: List<OpenAIMessage>,
+    @SerializedName("response_format")
+    val responseFormat: OpenAIResponseFormat? = null,
     @SerializedName("max_tokens")
-    val maxTokens: Int = 4096
+    val maxTokens: Int? = null,
+    @SerializedName("max_completion_tokens")
+    val maxCompletionTokens: Int? = null
 )
 
 private data class OpenAIMessage(
     val role: String,
     val content: Any // String or List<OpenAIContentPart>
+)
+
+private data class OpenAIResponseFormat(
+    val type: String = "json_object"
 )
 
 private sealed class OpenAIContentPart {
@@ -59,7 +68,8 @@ private data class OpenAIChoice(
 
 private data class OpenAIChoiceMessage(
     val role: String?,
-    val content: String?
+    val content: JsonElement?,
+    val refusal: String?
 )
 
 private data class OpenAIUsage(
@@ -146,10 +156,13 @@ class OpenAIClient(
                 openAIMessages.add(OpenAIMessage(role = msg.role, content = content))
             }
 
+            val isReasoningModel = model.startsWith("o1") || model.startsWith("o3") || model.startsWith("o4")
             val request = OpenAIRequest(
                 model = model,
                 messages = openAIMessages,
-                maxTokens = 4096
+                responseFormat = OpenAIResponseFormat(type = "json_object"),
+                maxTokens = if (isReasoningModel) null else 4096,
+                maxCompletionTokens = if (isReasoningModel) 4096 else null
             )
 
             val startTime = System.currentTimeMillis()
@@ -176,8 +189,10 @@ class OpenAIClient(
                 if (body.error != null) {
                     Result.failure(Exception("OpenAI API Error: ${body.error.message}"))
                 } else {
-                    val text = body.choices?.firstOrNull()?.message?.content
-                        ?: throw Exception("No content in OpenAI response")
+                    val firstMessage = body.choices?.firstOrNull()?.message
+                    val text = extractAssistantText(firstMessage?.content)
+                        ?: firstMessage?.refusal
+                        ?: throw Exception("No parseable assistant content in OpenAI response")
                     Result.success(text)
                 }
             } else {
@@ -191,5 +206,24 @@ class OpenAIClient(
 
     companion object {
         private const val TAG = "OpenAIClient"
+
+        @androidx.annotation.VisibleForTesting
+        internal fun extractAssistantText(content: JsonElement?): String? {
+            if (content == null || content.isJsonNull) return null
+
+            if (content.isJsonPrimitive) {
+                return content.asString.takeIf { it.isNotBlank() }
+            }
+
+            if (!content.isJsonArray) return null
+
+            val combined = content.asJsonArray.mapNotNull { part ->
+                val obj = part.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+                val text = obj.get("text")?.takeIf { !it.isJsonNull }?.asString ?: return@mapNotNull null
+                text.takeIf { it.isNotBlank() }
+            }.joinToString("\n")
+
+            return combined.takeIf { it.isNotBlank() }
+        }
     }
 }

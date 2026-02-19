@@ -1,0 +1,104 @@
+name: AndroidWorld Regression
+
+on:
+  workflow_dispatch:
+    inputs:
+      tasks:
+        description: "Comma-separated AndroidWorld task names, or 'all'"
+        required: true
+        default: "ContactsAddContact,ClockSetAlarm"
+      model:
+        description: "Model name passed to Agent Relay benchmark runner"
+        required: true
+        default: "claude-sonnet-4-5-20250929"
+      timeout:
+        description: "Per-task timeout in seconds"
+        required: true
+        default: "300"
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      TASKS: ${{ github.event.inputs.tasks }}
+      MODEL: ${{ github.event.inputs.model }}
+      TASK_TIMEOUT: ${{ github.event.inputs.timeout }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate secrets
+        run: |
+          if [ -z "${API_KEY}" ]; then
+            echo "Missing ANTHROPIC_API_KEY secret."
+            exit 1
+          fi
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Write secrets.xml
+        run: |
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/secrets.xml << EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="default_claude_api_key" translatable="false">${API_KEY}</string>
+              <string name="default_gemini_api_key" translatable="false">${GEMINI_API_KEY}</string>
+          </resources>
+          EOF
+
+      - name: Build debug APK
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:assembleDebug
+
+      - name: Install benchmark dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r androidworld_integration/requirements.txt
+
+      - name: Run benchmark on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: |
+            set -euo pipefail
+            adb wait-for-device
+            adb devices
+
+            export APK_PATH="$GITHUB_WORKSPACE/app/build/outputs/apk/debug/app-debug.apk"
+            export GEMINI_API_KEY="${GEMINI_API_KEY}"
+            bash androidworld_integration/setup_emulator.sh
+
+            python androidworld_integration/run_benchmark.py \
+              --api_key "$API_KEY" \
+              --model "$MODEL" \
+              --tasks "$TASKS" \
+              --timeout "$TASK_TIMEOUT" \
+              --output benchmark_results.json
+
+            adb logcat -d > logcat.txt || true
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: androidworld-regression-artifacts
+          path: |
+            benchmark_results.json
+            logcat.txt

@@ -356,7 +356,7 @@ class ScreenCaptureService : Service() {
         }
 
         // Scale down for API efficiency - more aggressive for low quality
-        val maxDimension = if (quality <= 10) 768 else 1920
+        val maxDimension = if (quality <= 15) 768 else 1920
         val scale = if (bitmap.width > bitmap.height) {
             maxDimension.toFloat() / bitmap.width
         } else {

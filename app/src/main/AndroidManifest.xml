@@ -44,6 +44,7 @@
         <activity
             android:name=".ScreenCaptureRequestActivity"
             android:exported="false"
+            android:launchMode="singleTop"
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:excludeFromRecents="true"
             android:taskAffinity="" />

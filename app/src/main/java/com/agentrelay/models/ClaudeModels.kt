@@ -210,7 +210,7 @@ data class ElementMap(
 }
 
 enum class SemanticAction {
-    CLICK, LONG_PRESS, TYPE, SWIPE, BACK, HOME, WAIT, COMPLETE, OPEN_APP, DISMISS_KEYBOARD, PRESS_ENTER, SHARE_FINDING, EXTRACT
+    CLICK, LONG_PRESS, TYPE, SWIPE, BACK, HOME, WAIT, COMPLETE, OPEN_APP, DISMISS_KEYBOARD, PRESS_ENTER, SHARE_FINDING, EXTRACT, NOTE, ASK_EXPERT, WEB_SEARCH
 }
 
 data class SemanticStep(
@@ -223,7 +223,9 @@ data class SemanticStep(
     val description: String = "",
     val findingKey: String? = null,    // for SHARE_FINDING
     val findingValue: String? = null,  // for SHARE_FINDING
-    val extractQuery: String? = null   // for EXTRACT
+    val extractQuery: String? = null,  // for EXTRACT
+    val noteText: String? = null,      // for NOTE — persisted across context trimming
+    val searchQuery: String? = null   // for ASK_EXPERT / WEB_SEARCH
 )
 
 data class SemanticActionPlan(
@@ -231,5 +233,6 @@ data class SemanticActionPlan(
     val reasoning: String = "",
     val confidence: String = "",      // "high", "medium", "low"
     val progressAssessment: String = "", // how the task is going overall
-    val relevantApps: List<String> = emptyList() // package names the LLM thinks may be needed
+    val relevantApps: List<String> = emptyList(), // package names the LLM thinks may be needed
+    val alternativePath: String? = null // brief description of alternative approach (when confidence is medium/low)
 )

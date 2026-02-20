@@ -36,10 +36,10 @@ class ScreenRecorder(
     private var recordWidth: Int = 0
     private var recordHeight: Int = 0
 
-    fun startRecording(): Boolean {
+    fun startRecording(taskDescription: String? = null): Boolean {
         if (isRecording) return true
         return try {
-            val outputFile = createOutputFile()
+            val outputFile = createOutputFile(taskDescription)
             currentFile = outputFile
             Log.d(TAG, "Preparing MediaRecorder, output: ${outputFile.absolutePath}")
 
@@ -122,7 +122,7 @@ class ScreenRecorder(
     }
 
     @Synchronized
-    fun stopRecording(): File? {
+    fun stopRecording(success: Boolean = false): File? {
         if (!isRecording) return null
         isRecording = false
         Log.d(TAG, "Stopping screen recording...")
@@ -162,8 +162,9 @@ class ScreenRecorder(
         if (file != null && file.exists()) {
             val size = file.length()
             if (size > 0L) {
-                Log.d(TAG, "Screen recording saved: ${file.absolutePath} ($size bytes)")
-                return file
+                val renamed = renameWithResult(file, success)
+                Log.d(TAG, "Screen recording saved: ${renamed.absolutePath} ($size bytes)")
+                return renamed
             } else {
                 Log.w(TAG, "Deleting 0-byte recording: ${file.absolutePath}")
                 file.delete()
@@ -182,15 +183,62 @@ class ScreenRecorder(
         }
     }
 
-    private fun createOutputFile(): File {
+    private fun createOutputFile(taskDescription: String? = null): File {
         val dir = getRecordingsDir()
         dir.mkdirs()
-        val timestamp = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
-        return File(dir, "agent_recording_$timestamp.mp4")
+        val timestamp = SimpleDateFormat("MMdd_HHmmss", Locale.US).format(Date())
+        val title = extractKeyWords(taskDescription)
+        val name = if (title != null) "${title}_$timestamp.mp4" else "agent_$timestamp.mp4"
+        return File(dir, name)
+    }
+
+    /**
+     * Rename the finished recording to: title_success/fail_MMdd_HHmmss.mp4
+     * The initial file is title_MMdd_HHmmss.mp4, so insert result before the timestamp.
+     */
+    private fun renameWithResult(file: File, success: Boolean): File {
+        val suffix = if (success) "success" else "fail"
+        val oldName = file.nameWithoutExtension
+        // Insert result suffix before the timestamp (last two _-separated segments)
+        val parts = oldName.split("_")
+        val newName = if (parts.size >= 2) {
+            val titleParts = parts.dropLast(2)
+            val dateParts = parts.takeLast(2)
+            (titleParts + suffix + dateParts).joinToString("_")
+        } else {
+            "${oldName}_$suffix"
+        }
+        val newFile = File(file.parentFile, "$newName.mp4")
+        return if (file.renameTo(newFile)) {
+            Log.d(TAG, "Renamed recording: ${file.name} -> ${newFile.name}")
+            newFile
+        } else {
+            Log.w(TAG, "Failed to rename recording, keeping: ${file.name}")
+            file
+        }
     }
 
     companion object {
         private const val TAG = "ScreenRecorder"
+
+        private val STOP_WORDS = setOf(
+            "a", "an", "the", "to", "in", "on", "at", "for", "of", "and", "or",
+            "is", "it", "my", "me", "i", "this", "that", "with", "from", "by",
+            "do", "does", "please", "can", "could", "would", "should", "will",
+            "just", "also", "then", "so", "if", "but", "not", "no", "yes",
+            "up", "out", "about", "into", "over", "after", "before"
+        )
+
+        /** Extract up to 3 high-information words from a task description. */
+        fun extractKeyWords(taskDescription: String?): String? {
+            if (taskDescription.isNullOrBlank()) return null
+            val words = taskDescription
+                .split("\\s+".toRegex())
+                .map { it.replace(Regex("[^a-zA-Z0-9]"), "").lowercase() }
+                .filter { it.isNotEmpty() && it !in STOP_WORDS }
+                .take(3)
+            return words.joinToString("_").take(40).ifEmpty { null }
+        }
 
         fun getRecordingsDir(): File {
             return File(
@@ -199,4 +247,5 @@ class ScreenRecorder(
             )
         }
     }
+
 }

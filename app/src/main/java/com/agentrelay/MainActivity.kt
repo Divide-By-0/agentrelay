@@ -1430,6 +1430,7 @@ fun SettingsTab(
         IOSSectionHeader("FAST MODEL")
         IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
             var selectedModel by remember { mutableStateOf(secureStorage.getModel()) }
+            var fastExpanded by remember { mutableStateOf(false) }
             val fastModelOptions = listOf(
                 "claude-haiku-4-5-20251001" to "Claude Haiku 4.5",
                 "claude-sonnet-4-5" to "Claude Sonnet 4.5",
@@ -1439,24 +1440,49 @@ fun SettingsTab(
                 "gpt-4o-mini" to "GPT-4o Mini",
                 "gpt-4o" to "GPT-4o",
                 "gemini-2.5-pro" to "Gemini 2.5 Pro",
-                "gemini-2.5-flash" to "Gemini 2.5 Flash"
+                "gemini-2.5-flash" to "Gemini 2.5 Flash",
+                "gemini-2.0-flash" to "Gemini 2.0 Flash"
             )
+            val selectedFastName = fastModelOptions.find { it.first == selectedModel }?.second ?: selectedModel
 
-            fastModelOptions.forEachIndexed { index, (modelId, modelName) ->
+            ExposedDropdownMenuBox(
+                expanded = fastExpanded,
+                onExpandedChange = { fastExpanded = it }
+            ) {
                 IOSSettingsRow(
-                    title = modelName,
+                    title = "Model",
                     trailing = {
-                        if (selectedModel == modelId) {
-                            Icon(Icons.Default.Check, contentDescription = null, tint = IOSBlue, modifier = Modifier.size(20.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(selectedFastName, color = IOSSecondaryLabel, fontSize = 15.sp)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                if (fastExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                contentDescription = null,
+                                tint = IOSSecondaryLabel,
+                                modifier = Modifier.size(20.dp)
+                            )
                         }
                     },
-                    onClick = {
-                        selectedModel = modelId
-                        secureStorage.saveModel(modelId)
-                    }
+                    onClick = { fastExpanded = true },
+                    modifier = Modifier.menuAnchor()
                 )
-                if (index < fastModelOptions.lastIndex) {
-                    Divider(color = IOSSeparator, modifier = Modifier.padding(start = 16.dp))
+                ExposedDropdownMenu(
+                    expanded = fastExpanded,
+                    onDismissRequest = { fastExpanded = false }
+                ) {
+                    fastModelOptions.forEach { (modelId, modelName) ->
+                        DropdownMenuItem(
+                            text = { Text(modelName) },
+                            onClick = {
+                                selectedModel = modelId
+                                secureStorage.saveModel(modelId)
+                                fastExpanded = false
+                            },
+                            trailingIcon = if (selectedModel == modelId) {
+                                { Icon(Icons.Default.Check, contentDescription = null, tint = IOSBlue, modifier = Modifier.size(18.dp)) }
+                            } else null
+                        )
+                    }
                 }
             }
         }
@@ -1474,30 +1500,56 @@ fun SettingsTab(
         IOSSectionHeader("THINKING MODEL")
         IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
             var selectedThinkingModel by remember { mutableStateOf(secureStorage.getPlanningModel()) }
+            var thinkingExpanded by remember { mutableStateOf(false) }
             val thinkingModelOptions = listOf(
                 "claude-opus-4-6" to "Claude Opus 4.6",
                 "claude-sonnet-4-6" to "Claude Sonnet 4.6",
                 "gpt-4.1" to "GPT-4.1",
                 "gpt-4o" to "GPT-4o",
                 "o4-mini" to "o4-mini",
-                "gemini-2.5-pro" to "Gemini 2.5 Pro"
+                "gemini-2.5-pro" to "Gemini 2.5 Pro",
+                "gemini-2.0-flash" to "Gemini 2.0 Flash"
             )
+            val selectedThinkingName = thinkingModelOptions.find { it.first == selectedThinkingModel }?.second ?: selectedThinkingModel
 
-            thinkingModelOptions.forEachIndexed { index, (modelId, modelName) ->
+            ExposedDropdownMenuBox(
+                expanded = thinkingExpanded,
+                onExpandedChange = { thinkingExpanded = it }
+            ) {
                 IOSSettingsRow(
-                    title = modelName,
+                    title = "Model",
                     trailing = {
-                        if (selectedThinkingModel == modelId) {
-                            Icon(Icons.Default.Check, contentDescription = null, tint = IOSBlue, modifier = Modifier.size(20.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(selectedThinkingName, color = IOSSecondaryLabel, fontSize = 15.sp)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                if (thinkingExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                contentDescription = null,
+                                tint = IOSSecondaryLabel,
+                                modifier = Modifier.size(20.dp)
+                            )
                         }
                     },
-                    onClick = {
-                        selectedThinkingModel = modelId
-                        secureStorage.savePlanningModel(modelId)
-                    }
+                    onClick = { thinkingExpanded = true },
+                    modifier = Modifier.menuAnchor()
                 )
-                if (index < thinkingModelOptions.lastIndex) {
-                    Divider(color = IOSSeparator, modifier = Modifier.padding(start = 16.dp))
+                ExposedDropdownMenu(
+                    expanded = thinkingExpanded,
+                    onDismissRequest = { thinkingExpanded = false }
+                ) {
+                    thinkingModelOptions.forEach { (modelId, modelName) ->
+                        DropdownMenuItem(
+                            text = { Text(modelName) },
+                            onClick = {
+                                selectedThinkingModel = modelId
+                                secureStorage.savePlanningModel(modelId)
+                                thinkingExpanded = false
+                            },
+                            trailingIcon = if (selectedThinkingModel == modelId) {
+                                { Icon(Icons.Default.Check, contentDescription = null, tint = IOSBlue, modifier = Modifier.size(18.dp)) }
+                            } else null
+                        )
+                    }
                 }
             }
         }
@@ -1658,6 +1710,7 @@ fun SettingsTab(
         IOSGroupedCard(modifier = Modifier.padding(horizontal = 16.dp)) {
             var blockTouchEnabled by remember { mutableStateOf(secureStorage.getBlockTouchDuringAgent()) }
             var interventionTrackingEnabled by remember { mutableStateOf(secureStorage.getInterventionTrackingEnabled()) }
+            var clarificationPromptsEnabled by remember { mutableStateOf(secureStorage.getClarificationPromptsEnabled()) }
 
             IOSSettingsRow(
                 icon = Icons.Default.TouchApp,
@@ -1701,6 +1754,28 @@ fun SettingsTab(
                 }
             )
 
+            Divider(color = IOSSeparator, modifier = Modifier.padding(start = 58.dp))
+
+            IOSSettingsRow(
+                icon = Icons.Default.QuestionAnswer,
+                iconBackground = Color(0xFFFF9500),
+                title = "Clarification Prompts",
+                subtitle = if (clarificationPromptsEnabled) "Shows alternative paths" else "Disabled",
+                trailing = {
+                    Switch(
+                        checked = clarificationPromptsEnabled,
+                        onCheckedChange = {
+                            clarificationPromptsEnabled = it
+                            secureStorage.setClarificationPromptsEnabled(it)
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = IOSGreen
+                        )
+                    )
+                }
+            )
+
         }
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -1730,8 +1805,9 @@ fun SettingsTab(
                                         val db = com.agentrelay.intervention.InterventionDatabase.getInstance(context)
                                         val interventions = withContext(Dispatchers.IO) { db.interventionDao().exportAll() }
                                         val traces = withContext(Dispatchers.IO) { db.agentTraceDao().exportAll() }
+                                        val clarifications = withContext(Dispatchers.IO) { db.userClarificationDao().exportAll() }
                                         val gson = com.google.gson.Gson()
-                                        val exportData = mapOf("interventions" to interventions, "trace" to traces)
+                                        val exportData = mapOf("interventions" to interventions, "trace" to traces, "clarifications" to clarifications)
                                         val json = gson.toJson(exportData)
                                         val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(
                                             android.os.Environment.DIRECTORY_DOWNLOADS
@@ -2555,10 +2631,11 @@ fun IOSSettingsRow(
     icon: ImageVector? = null,
     iconBackground: Color = IOSBlue,
     trailing: @Composable (() -> Unit)? = null,
-    onClick: (() -> Unit)? = null
+    onClick: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
 ) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 16.dp, vertical = 11.dp),

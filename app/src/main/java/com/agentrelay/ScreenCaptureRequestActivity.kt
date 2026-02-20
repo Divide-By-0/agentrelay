@@ -22,18 +22,30 @@ class ScreenCaptureRequestActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        handleIntent(intent)
+    }
 
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent?) {
         // If screen capture is already available, skip the permission request
-        if (ScreenCaptureService.instance != null) {
+        if (ScreenCaptureService.instance?.hasActiveProjection() == true) {
             Log.d(TAG, "Screen capture already active, starting task directly")
             startPendingTask()
             finish()
             return
         }
 
+        Log.d(TAG, "Requesting screen capture permission...")
         val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         startActivityForResult(projectionManager.createScreenCaptureIntent(), REQUEST_CODE)
     }
+
+    private var retryCount = 0
 
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -55,12 +67,21 @@ class ScreenCaptureRequestActivity : Activity() {
                 finish()
             }, 500)
         } else {
-            Log.w(TAG, "Screen capture permission denied")
-            Toast.makeText(this, "Screen capture permission required", Toast.LENGTH_SHORT).show()
-
-            // Still try to start the task in accessibility-only mode
-            startPendingTask()
-            finish()
+            Log.w(TAG, "Screen capture permission denied (attempt ${retryCount + 1})")
+            if (retryCount < 2) {
+                // Retry the permission request — sometimes the auto-tap hits the wrong button
+                retryCount++
+                Log.d(TAG, "Retrying screen capture permission request...")
+                window.decorView.postDelayed({
+                    val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                    startActivityForResult(projectionManager.createScreenCaptureIntent(), REQUEST_CODE)
+                }, 1000)
+            } else {
+                Toast.makeText(this, "Screen capture permission required", Toast.LENGTH_SHORT).show()
+                // Still try to start the task in accessibility-only mode
+                startPendingTask()
+                finish()
+            }
         }
     }
 
@@ -84,7 +105,7 @@ class ScreenCaptureRequestActivity : Activity() {
         fun launch(context: Context, task: String) {
             val intent = Intent(context, ScreenCaptureRequestActivity::class.java).apply {
                 putExtra(EXTRA_TASK, task)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             }
             context.startActivity(intent)
         }

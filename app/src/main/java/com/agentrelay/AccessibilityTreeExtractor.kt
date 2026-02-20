@@ -18,16 +18,16 @@ class AccessibilityTreeExtractor(private val service: AutomationService) {
         hasWebView = false
         var root: AccessibilityNodeInfo? = rootOverride
         if (root == null) {
-            for (attempt in 1..3) {
+            for (attempt in 1..5) {
                 root = service.getRootNode()
                 if (root != null) break
-                Log.w(TAG, "Root node null, retry $attempt/3")
-                delay(200)
+                Log.w(TAG, "Root node null, retry $attempt/5")
+                delay(300)
             }
         }
 
         if (root == null) {
-            Log.e(TAG, "Failed to get root node after 3 retries")
+            Log.e(TAG, "Failed to get root node after 5 retries")
             return emptyList()
         }
 
@@ -55,7 +55,11 @@ class AccessibilityTreeExtractor(private val service: AutomationService) {
         if (className != null && className.contains("WebView")) {
             hasWebView = true
         }
-        val type = classNameToElementType(className)
+        var type = classNameToElementType(className)
+        // Override type to SWITCH for checkable nodes regardless of class name
+        if (node.isCheckable && type != ElementType.CHECKBOX) {
+            type = ElementType.SWITCH
+        }
         val text = extractText(node)
         val isInteractive = node.isClickable || node.isFocusable || node.isCheckable
 

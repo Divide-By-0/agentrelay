@@ -64,14 +64,103 @@ class ElementMapGenerator(
             }
         }
 
-        // Add non-overlapping OCR elements as standalone TEXT elements
-        for ((ocrIdx, ocrEl) in ocrElements.withIndex()) {
-            if (ocrIdx !in matchedOcr && ocrEl.text.isNotBlank()) {
-                merged.add(ocrEl.copy(source = ElementSource.OCR))
-            }
+        // Group non-overlapping OCR elements by line, then add as standalone elements
+        val standaloneOcr = ocrElements.filterIndexed { idx, el ->
+            idx !in matchedOcr && el.text.isNotBlank()
+        }
+        val grouped = groupOcrTextByLine(standaloneOcr)
+        for (el in grouped) {
+            merged.add(el.copy(source = ElementSource.OCR))
         }
 
         return merged
+    }
+
+    /**
+     * Groups OCR text fragments that are on the same horizontal line into single elements.
+     * e.g., "Wi" + "-" + "Fi" → "Wi-Fi", "T" + "-" + "Mobile" → "T-Mobile"
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun groupOcrTextByLine(elements: List<UIElement>): List<UIElement> {
+        if (elements.size <= 1) return elements
+
+        // Sort by quantized y-line (bucket nearby y-centers together), then x-left.
+        // This prevents 1-2px y-center differences from breaking left-to-right order.
+        val sorted = elements.sortedWith(compareBy(
+            { (it.bounds.top + it.bounds.bottom) / 2 / 20 }, // quantize to 20px bands
+            { it.bounds.left }
+        ))
+
+        val result = mutableListOf<UIElement>()
+        var currentGroup = mutableListOf(sorted[0])
+
+        for (i in 1 until sorted.size) {
+            val curr = sorted[i]
+
+            // Compare against the entire current group's bounding box, not just last element
+            val groupLeft = currentGroup.minOf { it.bounds.left }
+            val groupRight = currentGroup.maxOf { it.bounds.right }
+            val groupTop = currentGroup.minOf { it.bounds.top }
+            val groupBottom = currentGroup.maxOf { it.bounds.bottom }
+            val groupCenterY = (groupTop + groupBottom) / 2
+
+            // Check vertical overlap: current element's center within group's y range
+            val currCenterY = (curr.bounds.top + curr.bounds.bottom) / 2
+            val minHeight = minOf(groupBottom - groupTop, curr.bounds.height()).coerceAtLeast(1)
+            val verticalClose = kotlin.math.abs(groupCenterY - currCenterY) < minHeight * 0.7
+
+            // Check horizontal proximity: gap between group's right edge and current's left
+            val gap = curr.bounds.left - groupRight
+            val avgCharWidth = (curr.bounds.width().toFloat() / curr.text.length.coerceAtLeast(1))
+                .coerceAtLeast(10f) // minimum 10px
+            val horizontalClose = gap < avgCharWidth * 3 && gap > -avgCharWidth * 0.5
+
+            if (verticalClose && horizontalClose) {
+                currentGroup.add(curr)
+            } else {
+                result.add(mergeGroup(currentGroup))
+                currentGroup = mutableListOf(curr)
+            }
+        }
+        result.add(mergeGroup(currentGroup))
+
+        return result
+    }
+
+    private fun mergeGroup(group: List<UIElement>): UIElement {
+        if (group.size == 1) return group[0]
+
+        val combinedText = group.joinToString("") { el ->
+            // Add space between words if there's a gap, otherwise concatenate directly
+            el.text
+        }
+        // Check if words need spacing (look at gaps between consecutive elements)
+        val spacedText = buildString {
+            for ((i, el) in group.withIndex()) {
+                if (i > 0) {
+                    val prevRight = group[i - 1].bounds.right
+                    val currLeft = el.bounds.left
+                    val gap = currLeft - prevRight
+                    val avgCharWidth = (el.bounds.width().toFloat() / el.text.length.coerceAtLeast(1))
+                    // Add space if gap is larger than a character width
+                    if (gap > avgCharWidth * 1.5) append(" ")
+                }
+                append(el.text)
+            }
+        }
+
+        val mergedBounds = Rect(
+            group.minOf { it.bounds.left },
+            group.minOf { it.bounds.top },
+            group.maxOf { it.bounds.right },
+            group.maxOf { it.bounds.bottom }
+        )
+
+        return group[0].copy(
+            text = spacedText,
+            bounds = mergedBounds,
+            isClickable = group.any { it.isClickable }
+        )
     }
 
     @androidx.annotation.VisibleForTesting

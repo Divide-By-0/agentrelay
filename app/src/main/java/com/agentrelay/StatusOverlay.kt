@@ -27,6 +27,9 @@ class StatusOverlay(private val context: Context) {
     private var stopButton: View? = null
     private var collapseButton: TextView? = null
     private var contentBody: View? = null
+    private var pinnedTaskView: TextView? = null
+    private var pinnedTaskText: String? = null
+    private var clarificationView: View? = null
     private var isShowing = false
     private val statusMessages = mutableListOf<String>()
     private var scrollViewHeight = 500
@@ -281,8 +284,25 @@ class StatusOverlay(private val context: Context) {
             setBackgroundColor(separatorColor)
         }
 
+        // Pinned task bar (always visible between header and log)
+        val pinnedTask = TextView(context).apply {
+            setTextColor(secondaryLabel)
+            textSize = 11f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(16), dp(6), dp(16), dp(6))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#F8F8FA"))
+            }
+            visibility = if (pinnedTaskText != null) View.VISIBLE else View.GONE
+            text = pinnedTaskText?.let { "📌 $it" } ?: ""
+        }
+        this.pinnedTaskView = pinnedTask
+
         innerLayout.addView(headerLayout)
         innerLayout.addView(sep)
+        innerLayout.addView(pinnedTask)
         innerLayout.addView(body)
 
         card.addView(innerLayout)
@@ -363,6 +383,7 @@ class StatusOverlay(private val context: Context) {
                 stopButton = null
                 collapseButton = null
                 contentBody = null
+                clarificationView = null
                 Log.d(TAG, "Status overlay hidden")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to hide status overlay", e)
@@ -384,6 +405,108 @@ class StatusOverlay(private val context: Context) {
         StatusBroadcaster.broadcast(context, formattedMessage)
     }
 
+    fun setPinnedTask(task: String?) {
+        pinnedTaskText = task
+        pinnedTaskView?.post {
+            if (task != null) {
+                pinnedTaskView?.text = "\uD83D\uDCCC $task"
+                pinnedTaskView?.visibility = View.VISIBLE
+            } else {
+                pinnedTaskView?.text = ""
+                pinnedTaskView?.visibility = View.GONE
+            }
+        }
+    }
+
+    /**
+     * Shows a compact clarification banner above the log area.
+     * The agent continues with its default plan; if the user taps the alternative button,
+     * [onAlternativeChosen] fires. Call [dismissClarification] to remove the banner.
+     */
+    fun showClarification(defaultDesc: String, alternativeDesc: String, onAlternativeChosen: () -> Unit, onDismissed: () -> Unit = {}) {
+        val body = contentBody as? LinearLayout ?: return
+        dismissClarification() // remove any existing banner
+
+        val banner = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(6) }
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#F2F2F7"))
+                cornerRadius = dp(8).toFloat()
+                setStroke(1, Color.parseColor("#D1D1D6"))
+            }
+            setPadding(dp(10), dp(8), dp(6), dp(8))
+        }
+
+        val textView = TextView(context).apply {
+            text = defaultDesc
+            setTextColor(Color.parseColor("#3C3C43"))
+            textSize = 11f
+            typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(6)
+            }
+        }
+
+        val altButton = TextView(context).apply {
+            text = alternativeDesc
+            setTextColor(accentBlue)
+            textSize = 11f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            gravity = Gravity.CENTER
+            maxLines = 2
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#E8E8ED"))
+                cornerRadius = dp(6).toFloat()
+            }
+            setOnClickListener {
+                onAlternativeChosen()
+                dismissClarification()
+            }
+        }
+
+        val dismissButton = TextView(context).apply {
+            text = "\u2715"
+            setTextColor(Color.parseColor("#8E8E93"))
+            textSize = 14f
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(dp(28), dp(28)).apply {
+                marginStart = dp(4)
+            }
+            setOnClickListener {
+                onDismissed()
+                dismissClarification()
+            }
+        }
+
+        banner.addView(textView)
+        banner.addView(altButton)
+        banner.addView(dismissButton)
+
+        body.post {
+            body.addView(banner, 0) // insert above the scroll view
+        }
+        clarificationView = banner
+    }
+
+    fun dismissClarification() {
+        val banner = clarificationView ?: return
+        val body = contentBody as? LinearLayout ?: return
+        body.post {
+            try {
+                body.removeView(banner)
+            } catch (_: Exception) {}
+        }
+        clarificationView = null
+    }
+
     private fun updateDisplay() {
         statusText?.post {
             statusText?.text = statusMessages.joinToString("\n")
@@ -395,6 +518,7 @@ class StatusOverlay(private val context: Context) {
 
     fun clear() {
         statusMessages.clear()
+        setPinnedTask(null)
         updateDisplay()
     }
 

@@ -188,6 +188,7 @@ class OCRClient(private val secureStorage: SecureStorage) {
                 type = ElementType.TEXT,
                 text = block.text,
                 bounds = block.bounds,
+                isClickable = true,
                 source = ElementSource.OCR
             )
         }

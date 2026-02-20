@@ -51,14 +51,47 @@ class BenchmarkReceiver : BroadcastReceiver() {
         }
 
         // 3. Start the task — same flow as OverlayWindow.startTaskWithCaptureCheck()
-        if (ScreenCaptureService.instance != null) {
-            // Screen capture already active — start directly
+        val captureService = ScreenCaptureService.instance
+        if (captureService != null && captureService.hasActiveProjection()) {
+            // Screen capture active and healthy — start directly
+            Log.d(TAG, "Screen capture active, starting task directly")
             CoroutineScope(Dispatchers.Main).launch {
                 orchestrator.startTask(task)
             }
         } else {
-            // Need screen capture permission — launch transparent activity
+            // Screen capture missing or stale — re-request permission
+            Log.d(TAG, "Screen capture not active (instance=${captureService != null}), requesting permission")
             ScreenCaptureRequestActivity.launch(context, task)
+
+            // Safety net: ScreenCaptureRequestActivity should start the task after permission is granted,
+            // but sometimes the callback chain fails or the dialog isn't auto-approved.
+            CoroutineScope(Dispatchers.IO).launch {
+                var retriedPermission = false
+                // Wait up to 45 seconds for screen capture to become available
+                for (attempt in 1..45) {
+                    kotlinx.coroutines.delay(1000)
+                    val svc = ScreenCaptureService.instance
+                    if (svc != null && svc.hasActiveProjection()) {
+                        // Screen capture is ready — check if orchestrator is already running
+                        if (!orchestrator.isCurrentlyRunning()) {
+                            Log.w(TAG, "Safety net: Screen capture active but orchestrator not running after ${attempt}s — starting task")
+                            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                orchestrator.startTask(task)
+                            }
+                        }
+                        break
+                    }
+                    // If screen capture isn't available after 15s, the permission dialog
+                    // likely wasn't auto-approved. Re-launch ScreenCaptureRequestActivity.
+                    if (attempt == 15 && !retriedPermission) {
+                        Log.w(TAG, "Safety net: Screen capture still not active after ${attempt}s — re-requesting permission")
+                        retriedPermission = true
+                        kotlinx.coroutines.withContext(Dispatchers.Main) {
+                            ScreenCaptureRequestActivity.launch(context, task)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -99,6 +132,36 @@ class BenchmarkReceiver : BroadcastReceiver() {
         if (!planningModel.isNullOrBlank()) {
             secureStorage.savePlanningModel(planningModel)
             Log.d(TAG, "Planning model configured: $planningModel")
+        }
+
+        // Boolean settings: screen_recording, send_screenshots
+        if (intent.hasExtra("screen_recording")) {
+            val enabled = intent.getStringExtra("screen_recording") == "true"
+            secureStorage.setScreenRecordingEnabled(enabled)
+            Log.d(TAG, "Screen recording: $enabled")
+        }
+
+        if (intent.hasExtra("send_screenshots")) {
+            val mode = intent.getStringExtra("send_screenshots") ?: "AUTO"
+            secureStorage.setScreenshotMode(
+                try { com.agentrelay.models.ScreenshotMode.valueOf(mode.uppercase()) }
+                catch (_: Exception) { com.agentrelay.models.ScreenshotMode.AUTO }
+            )
+            Log.d(TAG, "Screenshot mode: $mode")
+        }
+
+        // Google Vision API key for OCR
+        val visionKey = intent.getStringExtra("google_vision_api_key")
+        if (!visionKey.isNullOrBlank()) {
+            secureStorage.saveGoogleVisionApiKey(visionKey)
+            Log.d(TAG, "Google Vision API key configured")
+        }
+
+        // OCR enabled/disabled
+        if (intent.hasExtra("ocr_enabled")) {
+            val enabled = intent.getStringExtra("ocr_enabled") == "true"
+            secureStorage.setOcrEnabled(enabled)
+            Log.d(TAG, "OCR enabled: $enabled")
         }
     }
 }

@@ -28,6 +28,9 @@ class AutomationService : AccessibilityService() {
     /** Set to true while dispatching agent gestures so we can filter them from intervention tracking */
     val isAgentGesture = AtomicBoolean(false)
 
+    /** When true, auto-approves MediaProjection "Start now" dialog via accessibility clicks */
+    var autoApproveScreenCapture = AtomicBoolean(true)
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
         // Forward to InterventionTracker if tracking is enabled and this isn't our own gesture
@@ -35,6 +38,67 @@ class AutomationService : AccessibilityService() {
             try {
                 InterventionTracker.getInstance(this).onAccessibilityEvent(event)
             } catch (_: Exception) {}
+        }
+        // Auto-approve MediaProjection permission dialog
+        if (autoApproveScreenCapture.get() &&
+            event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            event.packageName?.toString() == "com.android.systemui") {
+            tryAutoApproveMediaProjection()
+        }
+    }
+
+    /**
+     * Attempts to find and click the "Start now" button in the MediaProjection
+     * permission dialog. This is more reliable than external adb shell taps.
+     */
+    private fun tryAutoApproveMediaProjection() {
+        try {
+            val root = rootInActiveWindow ?: return
+            // Look for "Start now" button text
+            val startNowNodes = root.findAccessibilityNodeInfosByText("Start now")
+            if (!startNowNodes.isNullOrEmpty()) {
+                for (node in startNowNodes) {
+                    if (node.isClickable) {
+                        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        Log.d(TAG, "Auto-approved MediaProjection dialog (clicked 'Start now')")
+                        node.recycle()
+                        return
+                    }
+                    // Try parent if the text node itself isn't clickable
+                    var parent = node.parent
+                    var depth = 0
+                    while (parent != null && depth < 3) {
+                        if (parent.isClickable) {
+                            parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                            Log.d(TAG, "Auto-approved MediaProjection dialog (clicked parent of 'Start now')")
+                            parent.recycle()
+                            node.recycle()
+                            return
+                        }
+                        val nextParent = parent.parent
+                        parent.recycle()
+                        parent = nextParent
+                        depth++
+                    }
+                    parent?.recycle()
+                    node.recycle()
+                }
+            }
+            // Also try "Allow" for older Android versions
+            val allowNodes = root.findAccessibilityNodeInfosByText("Allow")
+            if (!allowNodes.isNullOrEmpty()) {
+                for (node in allowNodes) {
+                    if (node.isClickable) {
+                        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        Log.d(TAG, "Auto-approved MediaProjection dialog (clicked 'Allow')")
+                        node.recycle()
+                        return
+                    }
+                    node.recycle()
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to auto-approve MediaProjection dialog", e)
         }
     }
 
@@ -474,7 +538,19 @@ class AutomationService : AccessibilityService() {
         return try {
             rootInActiveWindow
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to get root node", e)
+            Log.e(TAG, "Failed to get root node via rootInActiveWindow", e)
+            null
+        } ?: try {
+            // Fallback: rootInActiveWindow can be null when our overlay or system UI
+            // has focus. Enumerate all windows and find the top app window's root instead.
+            windows?.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+                ?.firstNotNullOfOrNull { w ->
+                    try { w.root } catch (_: Exception) { null }
+                }?.also {
+                    Log.d(TAG, "getRootNode: fell back to window enumeration (pkg=${it.packageName})")
+                }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get root node via window enumeration", e)
             null
         }
     }
@@ -498,12 +574,22 @@ class AutomationService : AccessibilityService() {
             } ?: false
         } catch (_: Exception) { false }
 
-        // Active windows list
+        // Active windows list — include package for app windows so LLM knows which app it's in
         val windowList = try {
             windows?.mapNotNull { w ->
                 val title = w.title?.toString()
                 val typeName = when (w.type) {
-                    AccessibilityWindowInfo.TYPE_APPLICATION -> "app"
+                    AccessibilityWindowInfo.TYPE_APPLICATION -> {
+                        // Include package name for app windows to disambiguate
+                        // (e.g., Settings "Internet" page vs the "Internet" browser)
+                        val root = w.root
+                        val pkg = root?.packageName?.toString()
+                        root?.recycle()
+                        if (pkg != null && title != null && !title.equals(pkg, ignoreCase = true))
+                            "app($pkg)"
+                        else
+                            "app"
+                    }
                     AccessibilityWindowInfo.TYPE_INPUT_METHOD -> "keyboard"
                     AccessibilityWindowInfo.TYPE_SYSTEM -> "system"
                     AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY -> "overlay"

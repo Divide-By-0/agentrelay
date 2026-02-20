@@ -56,6 +56,14 @@ resolve_gemini_key() {
     echo "$key"
 }
 
+resolve_vision_key() {
+    local key="${GOOGLE_VISION_API_KEY:-}"
+    [[ -z "$key" ]] && key=$(read_secret_from_xml "default_google_vision_api_key")
+    # Fall back to Gemini key (same Google API key format, works if Vision API enabled)
+    [[ -z "$key" ]] && key=$(resolve_gemini_key)
+    echo "$key"
+}
+
 log()  { echo "[agentrelay-cloud] $*"; }
 err()  { echo "[agentrelay-cloud] ERROR: $*" >&2; exit 1; }
 
@@ -311,12 +319,18 @@ cmd_setup_keys() {
     devices=$(get_cloud_emulator_devices)
     [[ -z "$devices" ]] && err "No cloud emulators connected via ADB. Run '$0 connect N' first."
 
+    local vision_key
+    vision_key=$(resolve_vision_key)
+
     for device in $devices; do
         log "Configuring API keys on $device..."
 
         local extras=""
         [[ -n "$anthropic_key" ]] && extras="$extras --es api_key $anthropic_key"
         [[ -n "$gemini_key" ]]    && extras="$extras --es gemini_api_key $gemini_key"
+        [[ -n "$vision_key" ]]    && extras="$extras --es google_vision_api_key $vision_key"
+        # Always enable screen recording, screenshots, and OCR for cloud emulators
+        extras="$extras --es screen_recording true --es send_screenshots AUTO --es ocr_enabled true"
 
         adb -s "$device" shell am broadcast \
             -n "$PACKAGE/$PACKAGE.benchmark.BenchmarkReceiver" \
@@ -324,7 +338,7 @@ cmd_setup_keys() {
             $extras \
             > /dev/null
 
-        log "  Keys configured on $device"
+        log "  Keys + recording + OCR configured on $device"
     done
     log "All API keys configured."
 }

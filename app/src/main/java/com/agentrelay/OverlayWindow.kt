@@ -366,7 +366,7 @@ class OverlayWindow(private val context: Context) {
      * If already available, starts the task directly.
      */
     private fun startTaskWithCaptureCheck(task: String) {
-        if (ScreenCaptureService.instance != null) {
+        if (ScreenCaptureService.instance?.hasActiveProjection() == true) {
             // Screen capture already active — start directly
             TaskHistory.addTask(context, task)
             CoroutineScope(Dispatchers.Main).launch {

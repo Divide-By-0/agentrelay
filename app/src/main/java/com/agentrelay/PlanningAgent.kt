@@ -25,7 +25,10 @@ data class PlanningResult(
     val approaches: List<ApproachStrategy>,
     val recommendedIndex: Int,
     val diagnosis: String? = null,
-    val splitScreen: SplitScreenRecommendation? = null
+    val splitScreen: SplitScreenRecommendation? = null,
+    val guidelines: String? = null,
+    val footguns: List<String> = emptyList(),
+    val successCriteria: String? = null
 ) {
     fun toGuidanceText(): String = buildString {
         val recommended = approaches.getOrNull(recommendedIndex) ?: approaches.firstOrNull()
@@ -47,6 +50,18 @@ data class PlanningResult(
         }
         if (diagnosis != null) {
             append("\nDiagnosis: $diagnosis\n")
+        }
+        if (!guidelines.isNullOrBlank()) {
+            append("\nDETAILED GUIDELINES:\n$guidelines\n")
+        }
+        if (footguns.isNotEmpty()) {
+            append("\nWARNING — COMMON PITFALLS:\n")
+            footguns.forEachIndexed { i, footgun ->
+                append("  ${i + 1}. $footgun\n")
+            }
+        }
+        if (!successCriteria.isNullOrBlank()) {
+            append("\nSUCCESS CRITERIA (verify before marking complete):\n$successCriteria\n")
         }
     }
 }
@@ -94,8 +109,16 @@ class PlanningAgent(
                       "confidence": 0.8
                     }
                   ],
-                  "recommendedIndex": 0
+                  "recommendedIndex": 0,
+                  "guidelines": "Step-by-step instructions for the recommended approach. Be SPECIFIC about UI elements (exact button names, icon descriptions, locations, wait points). Under 300 words.",
+                  "footguns": ["Specific pitfall 1 for THIS task", "Specific pitfall 2 — not generic advice"],
+                  "successCriteria": "How to verify task completion — what the screen should look like, what toast/confirmation to expect."
                 }
+
+                IMPORTANT — RICH GUIDANCE FIELDS:
+                - "guidelines": Detailed step-by-step instructions for the recommended approach. Be SPECIFIC about UI elements: exact button names, icon descriptions (e.g. "pencil icon in bottom-right"), screen locations, and wait points. The execution agent is fast but not strategic — give it a clear playbook. Under 300 words.
+                - "footguns": Array of 2-5 strings, each a SPECIFIC pitfall for THIS task and THESE apps. NOT generic advice like "be careful". Include: UI traps (e.g. "The 'Save' button at the top saves as draft, the one at the bottom actually sends"), navigation gotchas, sponsored content traps, keyboard blocking issues, data accuracy risks.
+                - "successCriteria": How to verify the task is truly complete. What the screen should show (e.g. "A toast saying 'Message sent'", "The contact card should show the updated phone number"), what confirmation to expect.
 
                 SPLIT-SCREEN PARALLEL EXECUTION:
                 You MUST include a "splitScreen" field when the task matches ANY of these patterns:
@@ -112,15 +135,21 @@ class PlanningAgent(
                 PATTERN 3 — MULTI-APP COORDINATION: The task naturally involves two apps working together.
                   Examples: "Copy text from Notes and paste into Messages", "Check calendar and set alarm"
 
+                PATTERN 4 — IMPLICIT LOOKUP: The task targets a named entity (company, place, person) where key details (address, phone, email) are NOT provided and must be looked up before acting.
+                  Trigger: task mentions a proper noun destination/target without providing the exact address/contact info
+                  Examples: "Get an Uber to Anthropic" (need Maps to find address, Uber to book), "Order flowers for Mom" (need Contacts for address, flower app to order), "Navigate to the nearest Costco" (need Maps to find it, then navigation)
+                  For these, the top app should look up the info and use "share_finding" to pass it to the bottom app.
+
                 When recommending split-screen:
                 - Use EXACT package names from the installed apps list
                 - Each sub-task description should be self-contained (the agent in each half only sees its own task)
                 - For PARALLEL SEARCH, each sub-task should include instructions to use "share_finding" to report what it finds (price, rating, link, etc.)
+                - For IMPLICIT LOOKUP, the lookup half should use "share_finding" to pass the discovered info (address, phone, etc.) to the action half
 
                 Format: "splitScreen": {"recommended": true, "topApp": "pkg.name", "bottomApp": "pkg.name",
                 "topTask": "description of what the top agent should do", "bottomTask": "description of what the bottom agent should do"}
 
-                Do NOT recommend split-screen for simple single-app tasks (e.g., "set an alarm", "send a text to John").
+                Do NOT recommend split-screen for tasks that clearly only need ONE app with NO external lookup (e.g., "set an alarm", "send a text to John at 555-0100", "open Settings and toggle WiFi").
 
                 ${if (installedApps.isNotEmpty()) "Installed apps:\n${installedApps.joinToString("\n") { "- ${it.name} (${it.packageName})" }}" else ""}
 
@@ -217,8 +246,13 @@ class PlanningAgent(
                       "confidence": 0.7
                     }
                   ],
-                  "recommendedIndex": 0
+                  "recommendedIndex": 0,
+                  "guidelines": "Step-by-step recovery instructions. Be SPECIFIC about the new approach.",
+                  "footguns": ["The specific failure that just happened", "Other pitfalls to avoid on the new approach"],
+                  "successCriteria": "How to verify the task is complete after recovery."
                 }
+
+                IMPORTANT — Include "guidelines" (detailed recovery steps), "footguns" (include the specific failure that just happened plus new pitfalls), and "successCriteria" (verification for the new approach).
 
                 User task: $task
 
@@ -304,11 +338,21 @@ class PlanningAgent(
                 null
             }
 
+            // Parse rich guidance fields
+            val guidelines = try { json.get("guidelines")?.asString } catch (_: Exception) { null }
+            val footguns = try {
+                json.getAsJsonArray("footguns")?.map { it.asString } ?: emptyList()
+            } catch (_: Exception) { emptyList() }
+            val successCriteria = try { json.get("successCriteria")?.asString } catch (_: Exception) { null }
+
             PlanningResult(
                 approaches = approaches,
                 recommendedIndex = recommendedIndex,
                 diagnosis = diagnosis,
-                splitScreen = splitScreen
+                splitScreen = splitScreen,
+                guidelines = guidelines,
+                footguns = footguns,
+                successCriteria = successCriteria
             )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse planning result from: $text", e)
@@ -385,6 +429,28 @@ class PlanningAgent(
         } catch (e: Exception) {
             Log.e(TAG, "Failed to generate app knowledge", e)
             emptyMap()
+        }
+    }
+
+    /**
+     * Asks the thinking model a factual or strategic question and returns a concise answer.
+     * Used by ASK_EXPERT and WEB_SEARCH escalation actions.
+     */
+    suspend fun answerQuestion(query: String): String {
+        return try {
+            val systemPrompt = """
+                Answer the following question concisely and accurately (1-3 sentences).
+                If you're not confident, say "I'm not sure" rather than guessing.
+                Provide ONLY the answer, no preamble.
+            """.trimIndent()
+            val messages = listOf(
+                Message(role = "user", content = listOf(ContentBlock.TextContent(text = query)))
+            )
+            val result = client.sendMessage(messages, systemPrompt)
+            result.getOrNull()?.content?.firstOrNull()?.text?.trim() ?: "Unable to answer"
+        } catch (e: Exception) {
+            Log.e(TAG, "answerQuestion failed for query: $query", e)
+            "Unable to answer: ${e.message}"
         }
     }
 

@@ -10,6 +10,7 @@ import com.agentrelay.models.*
 import com.agentrelay.ocr.OCRClient
 import kotlinx.coroutines.*
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.CRC32
 
 private data class StepExecutionResult(
@@ -47,11 +48,24 @@ class AgentOrchestrator(private val context: Context) {
     private var isRunning = false
     private var pendingRecoveryPlanJob: Deferred<PlanningResult?>? = null
 
+    /** Background expert/search query job — launched by ASK_EXPERT/WEB_SEARCH, consumed at top of main loop */
+    private data class PendingExpertQuery(
+        val job: Deferred<String>,
+        val query: String,
+        val action: SemanticAction // ASK_EXPERT or WEB_SEARCH
+    )
+    private var pendingExpertJob: PendingExpertQuery? = null
+
     private val conversationHistory = mutableListOf<Message>()
     private var currentTask: String = ""
     private var screenRecorder: ScreenRecorder? = null
+    private var taskSucceeded: Boolean = false
     /** After the first LLM call, only send these app packages in device context */
     private var relevantAppPackages: Set<String>? = null
+    /** Facts discovered during the task (from extract/note actions) — pinned and never trimmed */
+    private val discoveredFacts = mutableListOf<Pair<String, String>>()
+    /** Sub-tasks completed so far — pinned in message[0] so the LLM never re-does them after trimming */
+    private val completedSubTasks = mutableListOf<String>()
 
     /** Optional callback fired when a task finishes (used by benchmark harness). Auto-clears after firing. */
     var onTaskFinished: ((status: String, iterations: Int, message: String) -> Unit)? = null
@@ -131,6 +145,9 @@ class AgentOrchestrator(private val context: Context) {
         conversationHistory.clear()
         recentActions.clear()
         relevantAppPackages = null
+        discoveredFacts.clear()
+        completedSubTasks.clear()
+        taskSucceeded = false
         isRunning = true
 
         // Initialize intervention tracker and log task start
@@ -159,7 +176,7 @@ class AgentOrchestrator(private val context: Context) {
                     captureService.getScreenHeight(),
                     captureService.getScreenDensity()
                 )
-                if (recorder.startRecording()) {
+                if (recorder.startRecording(task)) {
                     screenRecorder = recorder
                     Log.d(TAG, "Screen recording started for trajectory")
                 } else {
@@ -174,6 +191,7 @@ class AgentOrchestrator(private val context: Context) {
         FloatingBubble.getInstance(context).hide()
         CursorOverlay.getInstance(context).show()
         StatusOverlay.getInstance(context).show()
+        StatusOverlay.getInstance(context).setPinnedTask(task)
         addStatus("Agent started for task: $task")
         ConversationHistoryManager.add(
             ConversationItem(
@@ -199,13 +217,16 @@ class AgentOrchestrator(private val context: Context) {
         }
     }
 
+    /** Returns true if the agent loop is currently executing a task */
+    fun isCurrentlyRunning(): Boolean = isRunning
+
     fun stop() {
         if (!isRunning && currentJob == null) return // already stopped
         isRunning = false
 
         // Stop screen recording BEFORE cancelling the coroutine so the
         // MediaRecorder can finalize the MP4 while everything is still alive.
-        val recordingFile = screenRecorder?.stopRecording()
+        val recordingFile = screenRecorder?.stopRecording(taskSucceeded)
         screenRecorder = null
         if (recordingFile != null) {
             Log.d(TAG, "Screen recording saved: ${recordingFile.absolutePath}")
@@ -222,6 +243,8 @@ class AgentOrchestrator(private val context: Context) {
         tracker.clearPlannedAction()
 
         CursorOverlay.getInstance(context).hide()
+        StatusOverlay.getInstance(context).dismissClarification()
+        StatusOverlay.getInstance(context).setPinnedTask(null)
         StatusOverlay.getInstance(context).hide()
         // Restore floating bubble when agent stops
         if (SecureStorage.getInstance(context).getFloatingBubbleEnabled()) {
@@ -365,6 +388,7 @@ class AgentOrchestrator(private val context: Context) {
         // (in iteration 1) so we don't need a duplicate screenshot capture at startup.
         var pendingPlanJob: Deferred<PlanningResult?>? = null
         pendingRecoveryPlanJob = null
+        pendingExpertJob = null
         if (planningAgent != null) {
             addStatus("Planning in background (acting proactively)...")
         }
@@ -444,8 +468,51 @@ class AgentOrchestrator(private val context: Context) {
                 pendingRecoveryPlanJob = null
             }
 
-            // Split-screen dispatch: if planning recommends it and we haven't tried yet
-            if (currentPlan?.splitScreen?.recommended == true && !splitScreenAttempted) {
+            // Check if background expert/search query has completed
+            if (pendingExpertJob != null && pendingExpertJob!!.job.isCompleted) {
+                try {
+                    val answer = pendingExpertJob!!.job.await()
+                    val query = pendingExpertJob!!.query
+                    val action = pendingExpertJob!!.action
+                    val actionLabel = if (action == SemanticAction.ASK_EXPERT) "EXPERT ANSWER" else "WEB SEARCH RESULT"
+
+                    if (action == SemanticAction.WEB_SEARCH && answer.contains("NAVIGATE_NEEDED")) {
+                        conversationHistory.add(Message(
+                            role = "user",
+                            content = listOf(ContentBlock.TextContent(
+                                text = "WEB SEARCH for '$query': This requires live data. Navigate to a browser and search manually."
+                            ))
+                        ))
+                        addStatus("Search: needs live data — navigate manually")
+                    } else {
+                        conversationHistory.add(Message(
+                            role = "user",
+                            content = listOf(ContentBlock.TextContent(
+                                text = "$actionLabel for '$query': $answer"
+                            ))
+                        ))
+                        discoveredFacts.add(query to answer)
+                        updatePinnedTaskMessage(task, currentPlan)
+                        addStatus("${if (action == SemanticAction.ASK_EXPERT) "Expert" else "Search"}: ${answer.take(60)}")
+                    }
+                    ConversationHistoryManager.add(
+                        ConversationItem(
+                            timestamp = System.currentTimeMillis(),
+                            type = ConversationItem.ItemType.ACTION_EXECUTED,
+                            action = action.name,
+                            actionDescription = "${action.name}: $query → ${answer.take(80)}",
+                            status = "${if (action == SemanticAction.ASK_EXPERT) "Expert" else "Search"}: ${answer.take(60)}"
+                        )
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "Background expert query failed", e)
+                    addStatus("Expert query failed: ${e.message?.take(40)}")
+                }
+                pendingExpertJob = null
+            }
+
+            // Split-screen dispatch: if planning recommends it, we haven't tried yet, and it's enabled in settings
+            if (currentPlan?.splitScreen?.recommended == true && !splitScreenAttempted && secureStorage.getSplitScreenEnabled()) {
                 splitScreenAttempted = true
                 val ss = currentPlan!!.splitScreen!!
                 val config = SplitScreenConfig(
@@ -635,6 +702,15 @@ class AgentOrchestrator(private val context: Context) {
                     val progressResult = checkProgressWithHaiku(
                         claudeClient, task, currentMapText, recentActionsSummary
                     )
+                    // Auto-complete: if progress check says task is done, finish immediately
+                    if (progressResult.third) {
+                        val reason = progressResult.second
+                        Log.i(TAG, "Progress check detected task completed: $reason")
+                        addStatus("Auto-completing: progress check confirmed task done")
+                        onTaskFinished?.invoke("completed", iteration, "Auto-completed: $reason")
+                        return
+                    }
+
                     if (!progressResult.first) {
                         val reason = progressResult.second
                         Log.w(TAG, "Progress check: NOT progressing — $reason")
@@ -842,6 +918,81 @@ class AgentOrchestrator(private val context: Context) {
                 )
             )
 
+            // 5a. Non-blocking clarification prompt (if alternative_path present and confidence != high)
+            val clarificationPromptsEnabled = secureStorage.getClarificationPromptsEnabled()
+            var redirectToAlternative = false
+            var alternativeText: String? = null
+            if (clarificationPromptsEnabled &&
+                plan.alternativePath != null &&
+                plan.confidence.lowercase() != "high"
+            ) {
+                val alternativeChosen = AtomicBoolean(false)
+                val userDismissed = AtomicBoolean(false)
+                val altPath = plan.alternativePath
+                val defaultDesc = plan.reasoning.take(60)
+                val statusOverlay = StatusOverlay.getInstance(context)
+
+                withContext(Dispatchers.Main) {
+                    statusOverlay.showClarification(defaultDesc, altPath,
+                        onAlternativeChosen = {
+                            alternativeChosen.set(true)
+                            alternativeText = altPath
+                        },
+                        onDismissed = {
+                            userDismissed.set(true)
+                        }
+                    )
+                }
+
+                // Give the user a brief window to tap before proceeding
+                delay(4000)
+
+                withContext(Dispatchers.Main) {
+                    statusOverlay.dismissClarification()
+                }
+
+                if (alternativeChosen.get()) {
+                    redirectToAlternative = true
+                    addStatus("User chose alternative: $altPath")
+                }
+
+                // Log the clarification event
+                val userChoice = when {
+                    alternativeChosen.get() -> "alternative"
+                    userDismissed.get() -> "dismissed"
+                    else -> "timeout"
+                }
+                InterventionTracker.getInstance(context).logClarification(
+                    task = task,
+                    iteration = iteration,
+                    defaultPath = plan.reasoning,
+                    alternativePath = altPath,
+                    userChose = userChoice,
+                    confidence = plan.confidence,
+                    elementMapSnapshot = currentMapText.take(2000)
+                )
+            }
+
+            // 5b. If user chose alternative, redirect the agent
+            if (redirectToAlternative && alternativeText != null) {
+                conversationHistory.add(
+                    Message(
+                        role = "user",
+                        content = listOf(ContentBlock.TextContent(
+                            text = "USER REDIRECT: The user wants you to try a different approach: ${alternativeText}. Abandon the current plan and follow this alternative path instead."
+                        ))
+                    )
+                )
+                ConversationHistoryManager.add(
+                    ConversationItem(
+                        timestamp = System.currentTimeMillis(),
+                        type = ConversationItem.ItemType.PLANNING,
+                        status = "User redirect: $alternativeText"
+                    )
+                )
+                continue // skip step execution, re-plan with alternative
+            }
+
             // 5. Execute each step in the plan
             val stepSignal = executeStepPlan(
                 plan, task, elementMap, currentMapText, screenshotInfo, screenW, screenH,
@@ -856,6 +1007,20 @@ class AgentOrchestrator(private val context: Context) {
             failuresSinceLastPlan = stepSignal.updatedFailuresSinceLastPlan
             if (stepSignal.updatedMapText != null) lastElementMapText = stepSignal.updatedMapText!!
             var taskCompleted = stepSignal.signal == StepLoopSignal.TASK_COMPLETED
+
+            // Track completed sub-tasks so the LLM never redoes them after history trimming.
+            // Record when a plan fully executed (CONTINUE = all steps ran, no replan needed).
+            if (stepSignal.signal == StepLoopSignal.CONTINUE) {
+                val milestone = plan.steps
+                    .filter { it.action != SemanticAction.WAIT && it.action != SemanticAction.COMPLETE }
+                    .joinToString(", ") { it.description }
+                if (milestone.isNotBlank()) {
+                    completedSubTasks.add(milestone)
+                    // Keep list bounded to avoid bloating the pinned message
+                    if (completedSubTasks.size > 15) completedSubTasks.removeAt(0)
+                    updatePinnedTaskMessage(task, currentPlan)
+                }
+            }
 
             if (taskCompleted) {
                 iterationsSinceLastComplete = 0
@@ -1185,6 +1350,8 @@ class AgentOrchestrator(private val context: Context) {
                             text = "EXTRACTION RESULT for '$query': ${extractResult.answer} [source: ${extractResult.source}]"
                         ))
                     ))
+                    discoveredFacts.add(query to extractResult.answer)
+                    updatePinnedTaskMessage(task, updatedPlan)
                     addStatus("Extract (${extractResult.source}): ${extractResult.answer.take(60)}")
                     ConversationHistoryManager.add(
                         ConversationItem(
@@ -1197,6 +1364,62 @@ class AgentOrchestrator(private val context: Context) {
                     )
                 }
                 continue // Move to next step
+            }
+
+            // Handle NOTE action inline — persist a fact to the pinned scratchpad
+            if (step.action == SemanticAction.NOTE) {
+                val noteText = step.noteText
+                if (!noteText.isNullOrBlank()) {
+                    val label = step.description.ifBlank { "Note" }
+                    discoveredFacts.add(label to noteText)
+                    updatePinnedTaskMessage(task, updatedPlan)
+                    Log.d(TAG, "Note saved: $label = $noteText")
+                    addStatus("Noted: ${noteText.take(60)}")
+                    ConversationHistoryManager.add(
+                        ConversationItem(
+                            timestamp = System.currentTimeMillis(),
+                            type = ConversationItem.ItemType.ACTION_EXECUTED,
+                            action = "NOTE",
+                            actionDescription = "Note: $label → ${noteText.take(80)}",
+                            status = "Noted: ${noteText.take(60)}"
+                        )
+                    )
+                }
+                continue
+            }
+
+            // Handle ASK_EXPERT / WEB_SEARCH — launch in background, result consumed at top of main loop
+            if (step.action == SemanticAction.ASK_EXPERT || step.action == SemanticAction.WEB_SEARCH) {
+                val query = step.searchQuery ?: step.extractQuery
+                if (query.isNullOrBlank()) {
+                    addStatus("${step.action}: missing query")
+                } else if (planningAgent != null) {
+                    val label = if (step.action == SemanticAction.ASK_EXPERT) "expert" else "search"
+                    addStatus("Asking $label in background: ${query.take(50)}...")
+                    val fullQuery = if (step.action == SemanticAction.WEB_SEARCH) {
+                        "Web search query: $query\nProvide the most accurate, current answer you can. " +
+                        "If this requires truly real-time data you don't have, say NAVIGATE_NEEDED."
+                    } else query
+                    pendingExpertJob = PendingExpertQuery(
+                        job = orchestratorScope.async(Dispatchers.IO) {
+                            planningAgent.answerQuestion(fullQuery)
+                        },
+                        query = query,
+                        action = step.action
+                    )
+                } else {
+                    val fallback = if (step.action == SemanticAction.ASK_EXPERT) {
+                        "EXPERT UNAVAILABLE: No thinking model configured. Try using web_search or navigating to the information manually."
+                    } else {
+                        "WEB SEARCH UNAVAILABLE: Navigate to a browser and search for: $query"
+                    }
+                    conversationHistory.add(Message(
+                        role = "user",
+                        content = listOf(ContentBlock.TextContent(text = fallback))
+                    ))
+                    addStatus("${step.action} unavailable — no thinking model")
+                }
+                continue
             }
 
             // Execute the step
@@ -1377,6 +1600,7 @@ class AgentOrchestrator(private val context: Context) {
                 treeExtractor, conversationHistory
             )
             if (verified) {
+                taskSucceeded = true
                 addStatus("Task completed: $msg")
                 showToast("Task completed: $msg")
                 onTaskFinished?.invoke("completed", -1, msg)
@@ -1392,6 +1616,8 @@ class AgentOrchestrator(private val context: Context) {
 
                 addStatus(if (isWrongTask) "Wrong task detected — forcing re-plan" else "Task not actually done — continuing")
                 failureContext.add("Agent claimed complete but verification failed: $msg. Reason: $reason")
+                completedSubTasks.add("[INCOMPLETE — verification failed] $msg (reason: ${reason.take(80)})")
+                updatePinnedTaskMessage(task, null)
                 conversationHistory.add(Message(role = "user", content = listOf(
                     ContentBlock.TextContent(
                         text = "You said the task is complete ('$msg') but the task is NOT done yet. " +
@@ -1403,6 +1629,7 @@ class AgentOrchestrator(private val context: Context) {
                 return CompleteActionResult(StepLoopSignal.CONTINUE, failuresSinceLastPlanDelta = failureDelta)
             }
         } else {
+            taskSucceeded = true
             addStatus("Task completed: $msg")
             showToast("Task completed: $msg")
             onTaskFinished?.invoke("completed", -1, msg)
@@ -1683,11 +1910,11 @@ class AgentOrchestrator(private val context: Context) {
                     val element = step.element?.let { elementMap.findById(it) }
                     if (element == null) {
                         val availableIds = elementMap.elements
-                            .filter { it.isClickable }
-                            .take(10)
+                            .filter { it.isClickable || it.source == com.agentrelay.models.ElementSource.OCR }
+                            .take(15)
                             .joinToString(", ") { "${it.id} (\"${it.text.take(20)}\")" }
                         val reason = "Element '${step.element}' not found in element map. " +
-                            "Available clickable elements: [$availableIds]"
+                            "Available elements: [$availableIds]"
                         Log.e(TAG, reason)
                         return StepExecutionResult(false, failureReason = reason)
                     }
@@ -1750,15 +1977,33 @@ class AgentOrchestrator(private val context: Context) {
                     val direction = step.direction ?: "down"
                     val screenW = elementMap.screenWidth
                     val screenH = elementMap.screenHeight
-                    val centerX = screenW / 2
-                    val centerY = screenH / 2
-                    val swipeDistance = screenH / 3
+                    // If an element is specified, swipe within its bounds (useful for
+                    // horizontal scroll rows like share sheet app lists)
+                    val targetElement = step.element?.let { elementMap.findById(it) }
+                    val centerX = targetElement?.let { (it.bounds.left + it.bounds.right) / 2 } ?: (screenW / 2)
+                    val centerY = targetElement?.let { (it.bounds.top + it.bounds.bottom) / 2 } ?: (screenH / 2)
+                    val swipeDistance = if (targetElement != null && (direction == "left" || direction == "right")) {
+                        // For horizontal swipes on an element, use element width
+                        (targetElement.bounds.right - targetElement.bounds.left) * 2 / 3
+                    } else {
+                        screenH / 3
+                    }
 
                     val (startX, startY, endX, endY) = when (direction) {
                         "up" -> listOf(centerX, centerY + swipeDistance / 2, centerX, centerY - swipeDistance / 2)
                         "down" -> listOf(centerX, centerY - swipeDistance / 2, centerX, centerY + swipeDistance / 2)
-                        "left" -> listOf(screenW * 3 / 4, centerY, screenW / 4, centerY)
-                        "right" -> listOf(screenW / 4, centerY, screenW * 3 / 4, centerY)
+                        "left" -> {
+                            val swW = if (targetElement != null) {
+                                (targetElement.bounds.right - targetElement.bounds.left) * 2 / 3
+                            } else { screenW / 2 }
+                            listOf(centerX + swW / 2, centerY, centerX - swW / 2, centerY)
+                        }
+                        "right" -> {
+                            val swW = if (targetElement != null) {
+                                (targetElement.bounds.right - targetElement.bounds.left) * 2 / 3
+                            } else { screenW / 2 }
+                            listOf(centerX - swW / 2, centerY, centerX + swW / 2, centerY)
+                        }
                         else -> listOf(centerX, centerY + swipeDistance / 2, centerX, centerY - swipeDistance / 2)
                     }
                     val ok = automationService.performSwipe(startX, startY, endX, endY, 500)
@@ -1783,6 +2028,17 @@ class AgentOrchestrator(private val context: Context) {
                     if (pkg.isNullOrBlank()) {
                         return StepExecutionResult(false, failureReason = "OPEN_APP action missing 'package' field")
                     }
+                    // Block redundant OPEN_APP if the target app is already in the foreground
+                    val currentPkg = automationService.getCurrentAppPackage()
+                    if (currentPkg == pkg) {
+                        val openAppCount = recentActions.takeLast(5).count { it.action == SemanticAction.OPEN_APP }
+                        if (openAppCount >= 2) {
+                            return StepExecutionResult(false,
+                                failureReason = "BLOCKED: App '$pkg' is ALREADY the current foreground app. " +
+                                    "You have opened it ${openAppCount} times recently. " +
+                                    "STOP re-opening and interact with the current screen instead — click elements, swipe, or type.")
+                        }
+                    }
                     val ok = automationService.performOpenApp(pkg)
                     if (!ok) {
                         return StepExecutionResult(false, failureReason = "Failed to launch app: $pkg — is it installed?")
@@ -1790,9 +2046,9 @@ class AgentOrchestrator(private val context: Context) {
                     // Wait for app to launch
                     delay(1500)
                     // Verify we landed in the right app
-                    val currentPkg = automationService.getCurrentAppPackage()
-                    if (currentPkg != null && currentPkg != pkg) {
-                        Log.w(TAG, "open_app targeted $pkg but landed in $currentPkg")
+                    val nowPkg = automationService.getCurrentAppPackage()
+                    if (nowPkg != null && nowPkg != pkg) {
+                        Log.w(TAG, "open_app targeted $pkg but landed in $nowPkg")
                     }
                     StepExecutionResult(true)
                 }
@@ -1818,6 +2074,10 @@ class AgentOrchestrator(private val context: Context) {
                 }
 
                 SemanticAction.EXTRACT -> StepExecutionResult(true) // handled inline before this call
+                SemanticAction.NOTE -> StepExecutionResult(true) // handled inline before this call
+                SemanticAction.ASK_EXPERT -> StepExecutionResult(true) // handled inline before this call
+                SemanticAction.WEB_SEARCH -> StepExecutionResult(true) // handled inline before this call
+
                 SemanticAction.COMPLETE -> StepExecutionResult(true)
             }
         } catch (e: Exception) {
@@ -1979,8 +2239,26 @@ class AgentOrchestrator(private val context: Context) {
                     } else if (fieldText.contains(expectedText, ignoreCase = true)) {
                         StepVerificationResult(true)
                     } else {
-                        StepVerificationResult(false,
-                            "Text field contains '${fieldText.take(30)}' but expected '${expectedText.take(30)}'")
+                        // WebView inputs (Chrome address bar, search fields) often don't expose
+                        // text through accessibility focus. Check if the element map now shows
+                        // elements containing our text (e.g., autocomplete suggestions with our query).
+                        val elements = treeExtractor.extract()
+                        val mapGen = ElementMapGenerator(screenWidth, screenHeight)
+                        val freshMap = mapGen.generate(elements)
+                        val freshText = freshMap.toTextRepresentation()
+                        val textLower = expectedText.lowercase()
+                        val mapContainsText = freshMap.elements.any { el ->
+                            el.text.lowercase().contains(textLower) ||
+                            el.id.lowercase().contains(textLower.replace(" ", "_").take(20))
+                        }
+                        if (mapContainsText) {
+                            // Text appears in element map (e.g., in autocomplete suggestions or input field)
+                            StepVerificationResult(true,
+                                diffSummary = "Text '${expectedText.take(20)}' found in element map (WebView/browser input)")
+                        } else {
+                            StepVerificationResult(false,
+                                "Text field contains '${fieldText.take(30)}' but expected '${expectedText.take(30)}'")
+                        }
                     }
                 }
 
@@ -1990,9 +2268,19 @@ class AgentOrchestrator(private val context: Context) {
                     val freshText = freshMap.toTextRepresentation()
 
                     if (freshText == preStepMapText) {
-                        // UI is identical — click had no visible effect
-                        StepVerificationResult(false,
-                            "Click on '${step.element}' had no visible effect — UI unchanged")
+                        // UI is identical — but clicking INPUT/text fields often doesn't
+                        // change the a11y tree (focus + keyboard appear, but element props stay same).
+                        // Allow these through to avoid false "no visible effect" blocks.
+                        val clickedElement = step.element?.let { freshMap.findById(it) }
+                        val isInputElement = clickedElement?.type == com.agentrelay.models.ElementType.INPUT
+                        val isTextElement = clickedElement?.type == com.agentrelay.models.ElementType.TEXT
+                        if (isInputElement || isTextElement) {
+                            StepVerificationResult(true,
+                                diffSummary = "Clicked ${clickedElement?.type} element (focus may have changed)")
+                        } else {
+                            StepVerificationResult(false,
+                                "Click on '${step.element}' had no visible effect — UI unchanged")
+                        }
                     } else {
                         // UI changed — report what changed for context
                         StepVerificationResult(true, diffSummary = summarizeMapDiff(preStepMapText, freshText))
@@ -2033,6 +2321,42 @@ class AgentOrchestrator(private val context: Context) {
      */
     private fun buildActionHistoryContext(): String {
         if (recentActions.size < 2) return ""
+
+        // Check for WAIT/OPEN_APP spam (these don't have elements, so element-based detection misses them)
+        val lastFive = recentActions.takeLast(5)
+        val waitOpenCount = lastFive.count { it.action == SemanticAction.WAIT || it.action == SemanticAction.OPEN_APP }
+        if (waitOpenCount >= 3) {
+            return buildString {
+                appendLine("⚠️ STAGNATION DETECTED: You have issued $waitOpenCount WAIT/OPEN_APP actions in the last 5 steps without meaningful interaction.")
+                appendLine("Repeatedly opening the app or waiting is NOT making progress. The app IS open — you need to INTERACT with it.")
+                appendLine()
+                appendLine("IMMEDIATE ACTIONS REQUIRED:")
+                appendLine("1. LOOK at the element map — identify buttons, text fields, links, or OCR text elements you can click")
+                appendLine("2. If the element map is mostly TEXT elements (from OCR), these ARE clickable — click them by ID")
+                appendLine("3. If you see an onboarding screen, look for 'Accept', 'Continue', 'Skip', 'Got it', 'Next' elements and CLICK them")
+                appendLine("4. If you see a disabled 'Got it' button on a carousel, SWIPE LEFT to advance through the carousel pages first")
+                appendLine("5. If the app shows a permissions dialog, click 'Allow' or 'Accept'")
+                appendLine("6. DO NOT issue another WAIT or OPEN_APP — you MUST click or type something on the current screen")
+            }
+        }
+
+        // Check for EXTRACT/ASK_EXPERT spam — same query repeated
+        val extractActions = recentActions.takeLast(6).filter {
+            it.action == SemanticAction.EXTRACT || it.action == SemanticAction.ASK_EXPERT
+        }
+        if (extractActions.size >= 3) {
+            // Check if descriptions are similar (same query repeated)
+            val descSet = extractActions.map { it.description.lowercase().take(40) }.toSet()
+            if (descSet.size <= 2) {
+                return buildString {
+                    appendLine("⚠️ REPEATED EXTRACT/QUERY DETECTED: You have issued ${extractActions.size} extract/ask_expert queries in the last 6 steps with similar content.")
+                    appendLine("The information you're looking for is likely NOT on this screen. STOP querying and:")
+                    appendLine("1. If you're looking for a specific field, try scrolling or looking for 'More fields'/'See more' buttons")
+                    appendLine("2. If you can't find it after scrolling, SAVE/SUBMIT what you have — partial completion is better than timeout")
+                    appendLine("3. Move on to the next part of the task")
+                }
+            }
+        }
 
         // Count consecutive identical actions from the tail
         val last = recentActions.last()
@@ -2167,6 +2491,15 @@ class AgentOrchestrator(private val context: Context) {
                 append("\n\nSTRATEGIC GUIDANCE:\n")
                 append(plan.toGuidanceText())
             }
+            if (discoveredFacts.isNotEmpty()) {
+                append("\n\nDISCOVERED FACTS (from earlier screens — use these, do NOT re-look-up):\n")
+                discoveredFacts.forEach { (label, value) -> append("- $label: $value\n") }
+            }
+            if (completedSubTasks.isNotEmpty()) {
+                append("\n\nCOMPLETED SUB-TASKS (already done — do NOT redo these):\n")
+                completedSubTasks.forEach { append("✓ $it\n") }
+                append("Continue from where you left off. Only work on parts of the task NOT listed above.")
+            }
         }
         conversationHistory[0] = Message(
             role = "user",
@@ -2261,19 +2594,26 @@ class AgentOrchestrator(private val context: Context) {
      * Asks a fast model (Haiku) whether the agent is making meaningful progress.
      * Returns (isProgressing, reason).
      */
+    /**
+     * Returns Triple(progressing, reason, taskCompleted).
+     */
     private suspend fun checkProgressWithHaiku(
         claudeClient: LLMClient,
         task: String,
         currentMapText: String,
         recentActionsSummary: String
-    ): Pair<Boolean, String> {
+    ): Triple<Boolean, String, Boolean> {
         val systemPrompt = """
             You are a progress evaluator for an Android automation agent.
             Given the original task, current screen state, and recent actions,
             determine if the agent is making meaningful progress toward completing the task.
 
             Respond with ONLY a JSON object:
-            {"progressing": true/false, "reason": "brief explanation"}
+            {"progressing": true/false, "task_completed": true/false, "reason": "brief explanation"}
+
+            Set "task_completed" to true ONLY if ALL parts of the original task have been fully accomplished
+            based on the current screen state. For example, if the task was "set a 5 min timer and start it"
+            and the screen shows a running timer counting down from 5:00, the task IS completed.
 
             Signs of NOT progressing:
             - Same actions repeated without visible change
@@ -2308,7 +2648,7 @@ class AgentOrchestrator(private val context: Context) {
             claudeClient.sendMessage(messages, systemPrompt)
         }
         val text = result.getOrNull()?.content?.firstOrNull()?.text
-            ?: return Pair(true, "Progress check unavailable") // Fail open
+            ?: return Triple(true, "Progress check unavailable", false) // Fail open
 
         return try {
             var cleanJson = text.trim()
@@ -2322,10 +2662,11 @@ class AgentOrchestrator(private val context: Context) {
             val json = com.google.gson.JsonParser.parseReader(reader).asJsonObject
             val progressing = json.get("progressing")?.asBoolean ?: true
             val reason = json.get("reason")?.asString ?: "Unknown"
-            Pair(progressing, reason)
+            val taskCompleted = json.get("task_completed")?.asBoolean ?: false
+            Triple(progressing, reason, taskCompleted)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to parse progress check response: $text", e)
-            Pair(true, "Parse error") // Fail open
+            Triple(true, "Parse error", false) // Fail open
         }
     }
 

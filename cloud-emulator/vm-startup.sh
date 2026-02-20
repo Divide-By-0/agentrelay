@@ -86,7 +86,8 @@ ExecStart=/opt/android-sdk/emulator/emulator \
     -no-boot-anim \
     -gpu swiftshader_indirect \
     -no-snapshot \
-    -port 5554
+    -port 5554 \
+    -grpc 8554
 Restart=on-failure
 RestartSec=10
 

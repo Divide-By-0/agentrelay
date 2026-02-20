@@ -56,6 +56,34 @@ data class AgentTraceEvent(
     val planSteps: String? = null  // compact summary of planned steps
 )
 
+@Entity(tableName = "user_clarifications")
+data class UserClarification(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val timestamp: Long = System.currentTimeMillis(),
+    val taskDescription: String = "",
+    val iteration: Int = 0,
+    val defaultPath: String = "",
+    val alternativePath: String = "",
+    val userChose: String = "",  // "default", "alternative", "timeout"
+    val confidence: String = "",
+    val elementMapSnapshot: String? = null
+)
+
+@Dao
+interface UserClarificationDao {
+    @Insert
+    suspend fun insert(clarification: UserClarification): Long
+
+    @Query("SELECT * FROM user_clarifications ORDER BY timestamp DESC LIMIT :limit")
+    suspend fun getRecent(limit: Int = 50): List<UserClarification>
+
+    @Query("SELECT * FROM user_clarifications ORDER BY timestamp ASC")
+    suspend fun exportAll(): List<UserClarification>
+
+    @Query("SELECT COUNT(*) FROM user_clarifications")
+    suspend fun getCount(): Int
+}
+
 @Dao
 interface InterventionDao {
     @Insert
@@ -99,13 +127,14 @@ interface AgentTraceDao {
 }
 
 @Database(
-    entities = [UserIntervention::class, AgentTraceEvent::class],
-    version = 2,
+    entities = [UserIntervention::class, AgentTraceEvent::class, UserClarification::class],
+    version = 3,
     exportSchema = false
 )
 abstract class InterventionDatabase : RoomDatabase() {
     abstract fun interventionDao(): InterventionDao
     abstract fun agentTraceDao(): AgentTraceDao
+    abstract fun userClarificationDao(): UserClarificationDao
 
     companion object {
         @Volatile

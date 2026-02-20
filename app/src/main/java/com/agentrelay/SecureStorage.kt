@@ -254,12 +254,28 @@ class SecureStorage(context: Context) {
         return sharedPreferences.getBoolean(KEY_INTERVENTION_TRACKING, true)
     }
 
+    fun setClarificationPromptsEnabled(enabled: Boolean) {
+        sharedPreferences.edit().putBoolean(KEY_CLARIFICATION_PROMPTS, enabled).apply()
+    }
+
+    fun getClarificationPromptsEnabled(): Boolean {
+        return sharedPreferences.getBoolean(KEY_CLARIFICATION_PROMPTS, true)
+    }
+
     fun setWakeWordEnabled(enabled: Boolean) {
         sharedPreferences.edit().putBoolean(KEY_WAKE_WORD_ENABLED, enabled).apply()
     }
 
     fun getWakeWordEnabled(): Boolean {
         return sharedPreferences.getBoolean(KEY_WAKE_WORD_ENABLED, false)
+    }
+
+    fun setSplitScreenEnabled(enabled: Boolean) {
+        sharedPreferences.edit().putBoolean(KEY_SPLIT_SCREEN_ENABLED, enabled).apply()
+    }
+
+    fun getSplitScreenEnabled(): Boolean {
+        return sharedPreferences.getBoolean(KEY_SPLIT_SCREEN_ENABLED, false) // default: OFF
     }
 
     companion object {
@@ -281,7 +297,9 @@ class SecureStorage(context: Context) {
         private const val KEY_SCREEN_RECORDING_ENABLED = "screen_recording_enabled"
         private const val KEY_BLOCK_TOUCH_DURING_AGENT = "block_touch_during_agent"
         private const val KEY_INTERVENTION_TRACKING = "intervention_tracking_enabled"
+        private const val KEY_CLARIFICATION_PROMPTS = "clarification_prompts_enabled"
         private const val KEY_WAKE_WORD_ENABLED = "wake_word_enabled"
+        private const val KEY_SPLIT_SCREEN_ENABLED = "split_screen_enabled"
 
         fun providerForModel(model: String): Provider {
             return when {

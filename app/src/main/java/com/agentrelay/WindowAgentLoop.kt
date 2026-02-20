@@ -182,6 +182,32 @@ class WindowAgentLoop(
                         continue
                     }
 
+                    SemanticAction.NOTE -> {
+                        val noteText = step.noteText
+                        if (!noteText.isNullOrBlank()) {
+                            conversationHistory.add(Message(
+                                role = "user",
+                                content = listOf(ContentBlock.TextContent(
+                                    text = "NOTED: ${step.description.ifBlank { "Note" }} = $noteText"
+                                ))
+                            ))
+                            Log.d(TAG, "[$slot] Note: ${noteText.take(60)}")
+                        }
+                        continue
+                    }
+
+                    SemanticAction.ASK_EXPERT, SemanticAction.WEB_SEARCH -> {
+                        val query = step.searchQuery ?: step.extractQuery ?: "unknown"
+                        conversationHistory.add(Message(
+                            role = "user",
+                            content = listOf(ContentBlock.TextContent(
+                                text = "NOTE: ${step.action} not available in split-screen mode. Navigate to find the information manually: $query"
+                            ))
+                        ))
+                        Log.d(TAG, "[$slot] ${step.action} not available in split-screen: $query")
+                        continue
+                    }
+
                     SemanticAction.COMPLETE -> {
                         Log.d(TAG, "[$slot] Task complete: ${step.description}")
                         coordinator.markComplete(slot)

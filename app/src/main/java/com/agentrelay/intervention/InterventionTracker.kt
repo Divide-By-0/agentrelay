@@ -203,6 +203,37 @@ class InterventionTracker private constructor(private val context: Context) {
         return dp[m][n]
     }
 
+    // ── Clarification Logging ──
+
+    fun logClarification(
+        task: String,
+        iteration: Int,
+        defaultPath: String,
+        alternativePath: String,
+        userChose: String, // "default", "alternative", "timeout"
+        confidence: String,
+        elementMapSnapshot: String? = null
+    ) {
+        scope.launch {
+            try {
+                db.userClarificationDao().insert(
+                    UserClarification(
+                        taskDescription = task,
+                        iteration = iteration,
+                        defaultPath = defaultPath,
+                        alternativePath = alternativePath,
+                        userChose = userChose,
+                        confidence = confidence,
+                        elementMapSnapshot = elementMapSnapshot
+                    )
+                )
+                Log.d(TAG, "Recorded clarification: userChose=$userChose, confidence=$confidence")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to save clarification", e)
+            }
+        }
+    }
+
     // ── Agent Trace Logging ──
 
     fun logTrace(
